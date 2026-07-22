@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>취합앱 — 인터랙티브 프로토타입 v1.3</title>
+<style>
+  :root{
+    --primary:#4f46e5; --primary-dark:#4338ca; --primary-light:#eef2ff;
+    --bg:#f8fafc; --surface:#ffffff; --border:#e2e8f0;
+    --text:#1e293b; --text-muted:#64748b; --text-faint:#94a3b8;
+    --success-bg:#dcfce7; --success-text:#15803d; --success-border:#86efac;
+    --warning-bg:#fef9c3; --warning-text:#a16207; --warning-border:#fde047;
+    --danger-bg:#fee2e2; --danger-text:#b91c1c; --danger-border:#fca5a5;
+    --info-bg:#f1f5f9; --info-text:#475569; --info-border:#cbd5e1;
+    --radius:10px; --radius-sm:6px;
+    --shadow:0 1px 3px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.04);
+    --shadow-md:0 4px 12px rgba(15,23,42,.08);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:'Pretendard','Malgun Gothic','Apple SD Gothic Neo',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.5; font-size:14px;
+  }
+  button{font-family:inherit;}
+  input,textarea,select{font-family:inherit; font-size:14px;}
+
+  /* ---------- App top bar (실제 서비스 내비게이션, 로그인 이후 노출) ---------- */
+  #appbar{
+    display:none; position:sticky; top:0; z-index:99; background:#fff; border-bottom:1px solid var(--border);
+    align-items:center; justify-content:space-between; padding:0 24px; height:56px;
+  }
+  #appbar.visible{display:flex;}
+  #appbar .appbar-left{display:flex; align-items:center; gap:28px;}
+  #appbar .appbar-brand{font-weight:800; color:var(--primary); font-size:15px; flex-shrink:0;}
+  #appbar .appbar-nav{display:flex; gap:4px;}
+  #appbar .appbar-nav button{
+    background:none; border:none; padding:9px 14px; border-radius:var(--radius-sm); font-size:14px; font-weight:600;
+    color:var(--text-muted); cursor:pointer; transition:.15s; white-space:nowrap;
+  }
+  #appbar .appbar-nav button:hover{background:#f1f5f9; color:var(--text);}
+  #appbar .appbar-nav button.active{background:var(--primary-light); color:var(--primary);}
+  #appbar .appbar-nav button[data-nav="admin"]{display:none;}
+  #appbar.is-admin .appbar-nav button[data-nav="admin"]{display:inline-flex;}
+  #appbar .appbar-right{display:flex; align-items:center; gap:10px; flex-shrink:0; white-space:nowrap;}
+  #appbar .appbar-user{font-size:12.5px; color:var(--text-muted); white-space:nowrap;}
+  #appbar .appbar-user b{color:var(--text);}
+
+  /* ---------- 취합 하위 탭 (엑셀 / hwpx) ---------- */
+  .collect-subnav{display:flex; gap:6px; margin-bottom:18px;}
+  .collect-subnav button{
+    background:#f1f5f9; border:1px solid transparent; padding:8px 16px; border-radius:999px; font-size:13px;
+    font-weight:600; color:var(--text-muted); cursor:pointer; transition:.15s;
+  }
+  .collect-subnav button.active{background:var(--primary); color:#fff;}
+
+  .screen{display:none; min-height:calc(100vh - 56px);}
+  .screen.active{display:block;}
+
+  /* ---------- shared components ---------- */
+  .app-shell{max-width:1180px; margin:0 auto; padding:32px 24px;}
+  .app-shell.narrow{max-width:920px;}
+  h1.page-title{font-size:20px; font-weight:700; margin:0 0 4px;}
+  p.page-sub{color:var(--text-muted); margin:0 0 24px; font-size:13.5px;}
+  .card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow);}
+  .btn{
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    padding:10px 18px; border-radius:var(--radius-sm); border:1px solid transparent;
+    font-size:14px; font-weight:600; cursor:pointer; transition:.15s;
+  }
+  .btn-primary{background:var(--primary); color:#fff;}
+  .btn-primary:hover{background:var(--primary-dark);}
+  .btn-primary:disabled{background:#c7d2fe; cursor:not-allowed;}
+  .btn-outline{background:#fff; border-color:var(--border); color:var(--text);}
+  .btn-outline:hover{background:#f8fafc;}
+  .btn-sm{padding:6px 12px; font-size:12.5px;}
+  .btn-block{width:100%;}
+  .badge{display:inline-flex; align-items:center; gap:4px; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid;}
+  .badge-success{background:var(--success-bg); color:var(--success-text); border-color:var(--success-border);}
+  .badge-warning{background:var(--warning-bg); color:var(--warning-text); border-color:var(--warning-border);}
+  .badge-danger{background:var(--danger-bg); color:var(--danger-text); border-color:var(--danger-border);}
+  .badge-info{background:var(--info-bg); color:var(--info-text); border-color:var(--info-border);}
+  .field-label{display:block; font-size:12.5px; font-weight:600; color:var(--text-muted); margin-bottom:6px;}
+  .field-input{
+    width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm);
+    background:#fff; color:var(--text); outline:none; transition:.15s;
+  }
+  .field-input:focus{border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-light);}
+  .tab-bar{display:flex; gap:4px; background:#f1f5f9; padding:4px; border-radius:var(--radius-sm); width:fit-content;}
+  .tab-bar button{
+    background:transparent; border:none; padding:9px 20px; border-radius:7px; font-size:14px; font-weight:600;
+    color:var(--text-muted); cursor:pointer; transition:.15s;
+  }
+  .tab-bar button.active{background:#fff; color:var(--primary); box-shadow:var(--shadow);}
+  svg.icon{width:20px; height:20px; stroke:currentColor; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round;}
+
+  /* ================= Screen 1: Login ================= */
+  #screen1 .auth-wrap{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:40px 20px;}
+  #screen1 .auth-card{width:100%; max-width:400px; padding:36px;}
+  #screen1 .brand{text-align:center; margin-bottom:24px;}
+  #screen1 .brand .logo{
+    width:44px; height:44px; border-radius:12px; background:var(--primary); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-weight:800; font-size:18px; margin:0 auto 12px;
+  }
+  #screen1 .brand h2{margin:0; font-size:17px;}
+  #screen1 .brand p{margin:4px 0 0; color:var(--text-muted); font-size:12.5px;}
+  #screen1 .auth-tabbar{display:flex; border-bottom:1px solid var(--border); margin-bottom:22px;}
+  #screen1 .auth-tabbar button{
+    flex:1; background:none; border:none; padding:10px 0; font-weight:700; font-size:14px; color:var(--text-faint);
+    border-bottom:2px solid transparent; margin-bottom:-1px; cursor:pointer;
+  }
+  #screen1 .auth-tabbar button.active{color:var(--primary); border-color:var(--primary);}
+  #screen1 .form-group{margin-bottom:14px;}
+  #screen1 .hint{font-size:11.5px; color:var(--text-faint); margin-top:5px;}
+  #screen1 .form-panel{display:none;}
+  #screen1 .form-panel.active{display:block;}
+  #screen1 .forgot{display:block; text-align:right; font-size:12.5px; color:var(--primary); text-decoration:none; margin:-6px 0 16px;}
+
+  /* ================= Screen 2: 생성(User Home) ================= */
+  #screen2 .prompt-hero{text-align:center; padding:60px 20px 30px;}
+  #screen2 .prompt-hero h2{font-size:24px; margin:0 0 8px;}
+  #screen2 .prompt-hero p{color:var(--text-muted); margin:0 0 28px;}
+  #screen2 .prompt-box{max-width:680px; margin:0 auto; position:relative;}
+  #screen2 .prompt-box textarea{
+    width:100%; min-height:64px; resize:none; border:1px solid var(--border); border-radius:16px;
+    padding:16px 60px 16px 20px; font-size:15px; box-shadow:var(--shadow-md); outline:none;
+  }
+  #screen2 .prompt-box textarea:focus{border-color:var(--primary);}
+  #screen2 .prompt-send{
+    position:absolute; right:10px; bottom:10px; width:38px; height:38px; border-radius:50%;
+    background:var(--primary); color:#fff; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer;
+  }
+  #screen2 .chips{display:flex; flex-wrap:wrap; gap:8px; justify-content:center; max-width:680px; margin:18px auto 0;}
+  #screen2 .chip{
+    background:#fff; border:1px solid var(--border); border-radius:999px; padding:9px 16px; font-size:13px;
+    cursor:pointer; color:var(--text); transition:.15s;
+  }
+  #screen2 .chip:hover{border-color:var(--primary); color:var(--primary); background:var(--primary-light);}
+
+  /* ================= Screen 3: AI form generation chat ================= */
+  #screen3 .gen-layout{display:grid; grid-template-columns:1.4fr 1fr; gap:20px; align-items:start;}
+  @media (max-width:820px){#screen3 .gen-layout{grid-template-columns:1fr;}}
+  #screen3 .chat-card{display:flex; flex-direction:column; height:600px;}
+  #screen3 .chat-log{flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:14px;}
+  #screen3 .bubble{max-width:80%; padding:11px 15px; border-radius:14px; font-size:13.8px; line-height:1.5;}
+  #screen3 .bubble.ai{background:#f1f5f9; align-self:flex-start; border-bottom-left-radius:4px;}
+  #screen3 .bubble.user{background:var(--primary); color:#fff; align-self:flex-end; border-bottom-right-radius:4px;}
+  #screen3 .chat-input-row{display:flex; gap:8px; padding:14px; border-top:1px solid var(--border);}
+  #screen3 .chat-input-row input{flex:1;}
+  #screen3 .spec-panel{padding:18px;}
+  #screen3 .spec-panel h3{margin:0 0 4px; font-size:14.5px;}
+  #screen3 .spec-panel .spec-sub{color:var(--text-muted); font-size:12px; margin:0 0 14px;}
+  #screen3 .spec-card{
+    background:var(--info-bg); border:1px solid var(--info-border); border-radius:var(--radius-sm);
+    padding:10px 12px; margin-bottom:8px; animation:pop .25s ease;
+  }
+  @keyframes pop{from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);}}
+  #screen3 .spec-card .k{font-size:11px; font-weight:700; color:var(--primary); text-transform:uppercase; letter-spacing:.02em;}
+  #screen3 .spec-card .v{font-size:13px; margin-top:2px;}
+  #screen3 .spec-empty{color:var(--text-faint); font-size:12.5px; text-align:center; padding:24px 10px; border:1px dashed var(--border); border-radius:var(--radius-sm);}
+  #screen3 .progress-track{height:6px; background:#e2e8f0; border-radius:99px; overflow:hidden; margin:14px 0 16px;}
+  #screen3 .progress-fill{height:100%; background:var(--primary); width:0%; transition:width .3s;}
+
+  /* ================= Screen 4: Excel upload ================= */
+  #screen4 .dropzone{
+    border:2px dashed var(--border); border-radius:var(--radius); padding:40px 20px; text-align:center;
+    color:var(--text-muted); cursor:pointer; transition:.15s; margin-bottom:24px; background:#fff;
+  }
+  #screen4 .dropzone:hover{border-color:var(--primary); background:var(--primary-light);}
+  #screen4 .dropzone svg{margin-bottom:10px; color:var(--text-faint);}
+  #screen4 .file-item{padding:16px 18px; margin-bottom:10px;}
+  #screen4 .file-item-head{display:flex; justify-content:space-between; align-items:center;}
+  #screen4 .file-item-name{font-weight:700; font-size:13.8px;}
+  #screen4 .sheet-list{display:flex; flex-wrap:wrap; gap:6px; margin-top:10px;}
+  #screen4 .sheet-tag{background:var(--info-bg); border:1px solid var(--info-border); color:var(--info-text); border-radius:6px; padding:3px 9px; font-size:12px;}
+
+  /* ================= Screen 5: Review & selection ================= */
+  #screen5 .toolbar{display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;}
+  #screen5 .row-file{border-bottom:1px solid var(--border);}
+  #screen5 .row-file:last-child{border-bottom:none;}
+  #screen5 .row-main{display:flex; align-items:center; gap:12px; padding:14px 18px; cursor:pointer;}
+  #screen5 .row-main input[type=checkbox]{width:17px; height:17px; accent-color:var(--primary); cursor:pointer;}
+  #screen5 .row-main .fname{flex:1; font-weight:600; font-size:13.8px;}
+  #screen5 .row-detail{display:none; padding:0 18px 16px 47px;}
+  #screen5 .row-file.expanded .row-detail{display:block;}
+  #screen5 .row-file.expanded .chev{transform:rotate(90deg);}
+  #screen5 .chev{transition:.15s; color:var(--text-faint); flex-shrink:0;}
+  #screen5 .detail-item{
+    display:grid; grid-template-columns:70px 50px 130px 1fr; gap:10px; font-size:12.5px; padding:7px 0;
+    border-bottom:1px dashed var(--border); align-items:center;
+  }
+  #screen5 .detail-item:last-child{border-bottom:none;}
+  #screen5 .detail-item .dt-type{font-weight:700; color:var(--text-muted);}
+  #screen5 .detail-item .dt-loc{color:var(--text-faint); font-family:'Consolas',monospace;}
+  #screen5 .selection-bar{
+    position:sticky; bottom:0; background:#fff; border-top:1px solid var(--border); padding:16px 20px;
+    display:flex; justify-content:space-between; align-items:center; margin-top:18px; border-radius:var(--radius);
+    box-shadow:0 -4px 12px rgba(15,23,42,.06);
+  }
+  #screen5 .selection-count{font-size:13.5px; color:var(--text-muted);}
+  #screen5 .selection-count b{color:var(--text); font-size:15px;}
+
+  /* ================= Screen 6: Synthesis mode ================= */
+  #screen6 .mode-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-bottom:26px;}
+  @media (max-width:760px){#screen6 .mode-grid{grid-template-columns:1fr;}}
+  #screen6 .mode-card{padding:18px; cursor:pointer; border:2px solid var(--border); transition:.15s; position:relative;}
+  #screen6 .mode-card:hover{border-color:#c7d2fe;}
+  #screen6 .mode-card.selected{border-color:var(--primary); background:var(--primary-light);}
+  #screen6 .mode-card .mode-letter{
+    width:28px; height:28px; border-radius:8px; background:var(--primary); color:#fff; font-weight:800;
+    display:flex; align-items:center; justify-content:center; font-size:13px; margin-bottom:10px;
+  }
+  #screen6 .mode-card h4{margin:0 0 6px; font-size:14.5px;}
+  #screen6 .mode-card p{margin:0; font-size:12.5px; color:var(--text-muted); line-height:1.55;}
+  #screen6 .mode-card .check{position:absolute; top:16px; right:16px; color:var(--primary); display:none;}
+  #screen6 .mode-card.selected .check{display:block;}
+  #screen6 .preview-card{padding:20px;}
+  #screen6 .preview-card h4{margin:0 0 14px; font-size:14px; display:flex; align-items:center; gap:8px;}
+  #screen6 .sheet-tabs{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px;}
+  #screen6 .sheet-tabs span{
+    background:#fff; border:1px solid var(--border); border-bottom:2px solid var(--primary); padding:6px 14px;
+    border-radius:6px 6px 0 0; font-size:12.5px; font-weight:600;
+  }
+  #screen6 table.preview-table{width:100%; border-collapse:collapse; font-size:12.5px;}
+  #screen6 table.preview-table th{background:#f8fafc; text-align:left; padding:8px 10px; border:1px solid var(--border); font-weight:700; color:var(--text-muted);}
+  #screen6 table.preview-table td{padding:8px 10px; border:1px solid var(--border);}
+  #screen6 table.preview-table tr.summary-row td{background:#fffbeb; font-weight:700;}
+
+  /* ================= Screen 7: Result ================= */
+  #screen7 .metric-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-bottom:28px;}
+  @media (min-width:820px){#screen7 .metric-grid{grid-template-columns:repeat(4,1fr);}}
+  #screen7 .metric-card{padding:18px; display:flex; flex-direction:column; gap:10px;}
+  #screen7 .metric-card .m-icon{
+    width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+  }
+  #screen7 .metric-card .m-num{font-size:24px; font-weight:800;}
+  #screen7 .metric-card .m-label{color:var(--text-muted); font-size:12.5px;}
+  #screen7 .section-title{font-size:14.5px; font-weight:700; margin:26px 0 12px;}
+  #screen7 .two-col{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+  @media (max-width:700px){#screen7 .two-col{grid-template-columns:1fr;}}
+  #screen7 .file-row{display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid var(--border); font-size:13px;}
+  #screen7 .file-row:last-child{border-bottom:none;}
+  #screen7 .autofix-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; margin-top:10px;}
+  #screen7 .autofix-item{display:flex; gap:10px; align-items:flex-start; padding:12px; background:#fff; border:1px solid var(--border); border-radius:var(--radius-sm);}
+  #screen7 .autofix-item svg{color:var(--primary); flex-shrink:0; margin-top:1px;}
+  #screen7 .autofix-item .t{font-size:12.5px; font-weight:600;}
+  #screen7 .autofix-item .d{font-size:11.5px; color:var(--text-muted);}
+
+  /* ================= Screen 8: hwpx merge ================= */
+  #screen8 .count-badge{background:var(--primary-light); color:var(--primary); font-weight:700; padding:6px 14px; border-radius:999px; font-size:13px;}
+  #screen8 .drag-list{margin-top:16px;}
+  #screen8 .drag-item{
+    display:flex; align-items:center; gap:12px; padding:13px 16px; margin-bottom:8px; background:#fff;
+    border:1px solid var(--border); border-radius:var(--radius-sm); cursor:grab; user-select:none; transition:.12s;
+  }
+  #screen8 .drag-item.dragging{opacity:.4;}
+  #screen8 .drag-item .order-num{
+    width:24px; height:24px; border-radius:50%; background:var(--primary); color:#fff; font-size:12px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+  }
+  #screen8 .drag-item .grip{color:var(--text-faint); flex-shrink:0;}
+  #screen8 .drag-item .fname{flex:1; font-size:13.5px; font-weight:600;}
+  #screen8 .drag-item .fsize{color:var(--text-faint); font-size:12px;}
+  #screen8 .drag-hint{font-size:12px; color:var(--text-faint); margin-top:4px;}
+
+  /* ================= Screen 9: history ================= */
+  #screen9 .history-toolbar{display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap;}
+  #screen9 .history-toolbar input{max-width:280px;}
+  #screen9 .filter-btns{display:flex; gap:6px;}
+  #screen9 .filter-btns button{
+    background:#fff; border:1px solid var(--border); padding:9px 16px; border-radius:var(--radius-sm); font-size:13px; cursor:pointer;
+  }
+  #screen9 .filter-btns button.active{background:var(--primary); color:#fff; border-color:var(--primary);}
+  #screen9 .hist-row{display:flex; align-items:center; gap:14px; padding:14px 18px; border-bottom:1px solid var(--border);}
+  #screen9 .hist-row:last-child{border-bottom:none;}
+  #screen9 .hist-icon{width:36px; height:36px; border-radius:9px; display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+  #screen9 .hist-main{flex:1;}
+  #screen9 .hist-name{font-weight:600; font-size:13.6px;}
+  #screen9 .hist-meta{color:var(--text-faint); font-size:12px; margin-top:2px;}
+  #screen9 .hist-empty{text-align:center; padding:40px; color:var(--text-faint); font-size:13px;}
+
+  /* ================= Screen 10: Admin ================= */
+  #screen10 .metric-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-bottom:28px;}
+  @media (min-width:820px){#screen10 .metric-grid{grid-template-columns:repeat(4,1fr);}}
+  #screen10 .metric-card{padding:16px;}
+  #screen10 .metric-card .m-label{color:var(--text-muted); font-size:12px; margin-bottom:6px;}
+  #screen10 .metric-card .m-num{font-size:21px; font-weight:800;}
+  #screen10 table.acc-table{width:100%; border-collapse:collapse; font-size:13px;}
+  #screen10 table.acc-table th{text-align:left; padding:11px 14px; background:#f8fafc; color:var(--text-muted); font-size:12px; border-bottom:1px solid var(--border);}
+  #screen10 table.acc-table td{padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:middle;}
+  #screen10 .email-cell{max-width:190px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:block; color:var(--text-muted);}
+  #screen10 .policy-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:20px;}
+  @media (max-width:700px){#screen10 .policy-grid{grid-template-columns:1fr;}}
+  #screen10 .policy-input-wrap{display:flex; align-items:center; gap:8px;}
+  #screen10 .policy-input-wrap input{width:100%; min-width:0; padding:10px 12px;}
+  #screen10 .policy-input-wrap span{color:var(--text-muted); font-size:13px; white-space:nowrap; flex-shrink:0;}
+  #screen10 .section-title{font-size:14.5px; font-weight:700; margin:26px 0 12px;}
+
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .stack{display:flex; flex-direction:column; gap:16px;}
+</style>
+</head>
+<body>
+
+<!-- 실제 서비스 상단 내비게이션 바 (로그인 이후에만 노출) -->
+<header id="appbar">
+  <div class="appbar-left">
+    <span class="appbar-brand">취합앱</span>
+    <nav class="appbar-nav">
+      <button data-nav="create" onclick="goto('screen2')">생성</button>
+      <button data-nav="collect" onclick="goto('screen4')">취합</button>
+      <button data-nav="history" onclick="goto('screen9')">작업 이력 조회</button>
+      <button data-nav="admin" onclick="goto('screen10')">Admin 콘솔</button>
+    </nav>
+  </div>
+  <div class="appbar-right">
+    <span class="appbar-user">사번 <b id="appbar-empno">-</b></span>
+    <button class="btn btn-outline btn-sm" onclick="logout()">로그아웃</button>
+  </div>
+</header>
+
+<!-- ========================================================= -->
+<!-- SCREEN 1: 로그인 및 회원가입 -->
+<!-- ========================================================= -->
+<section class="screen active" id="screen1">
+  <div class="auth-wrap">
+    <div class="card auth-card">
+      <div class="brand">
+        <div class="logo">취</div>
+        <h2>취합앱</h2>
+        <p>자료 취합 전용 프로그램</p>
+      </div>
+      <div class="auth-tabbar">
+        <button class="active" data-auth-tab="login">로그인</button>
+        <button data-auth-tab="signup">회원가입</button>
+      </div>
+
+      <div class="form-panel active" id="login-panel">
+        <div class="form-group">
+          <label class="field-label">사번(로그인 ID)</label>
+          <input class="field-input" type="text" id="login-empno" placeholder="예: 20261234">
+        </div>
+        <div class="form-group">
+          <label class="field-label">비밀번호</label>
+          <input class="field-input" type="password" placeholder="비밀번호 입력">
+        </div>
+        <a class="forgot" href="#">비밀번호를 잊으셨나요?</a>
+        <div class="form-group" style="display:flex; align-items:center; gap:6px; margin:-4px 0 14px;">
+          <input type="checkbox" id="demo-admin-check" style="width:15px;height:15px;">
+          <label for="demo-admin-check" style="font-size:12px; color:var(--text-faint); cursor:pointer;">데모: Admin 권한으로 로그인</label>
+        </div>
+        <button class="btn btn-primary btn-block" id="login-btn">로그인</button>
+      </div>
+
+      <div class="form-panel" id="signup-panel">
+        <div class="form-group">
+          <label class="field-label">사번(직원번호)</label>
+          <input class="field-input" type="text" placeholder="예: 20261234">
+          <div class="hint">가입 시 로그인 ID로 사용됩니다.</div>
+        </div>
+        <div class="form-group">
+          <label class="field-label">비밀번호</label>
+          <input class="field-input" type="password" placeholder="비밀번호 입력">
+        </div>
+        <div class="form-group">
+          <label class="field-label">비밀번호 확인</label>
+          <input class="field-input" type="password" placeholder="비밀번호 재입력">
+        </div>
+        <div class="form-group">
+          <label class="field-label">이메일 (비밀번호 재설정용)</label>
+          <input class="field-input" type="email" placeholder="name@company.com">
+          <div class="hint">비밀번호를 잊었을 때 재설정 인증에만 사용됩니다.</div>
+        </div>
+        <button class="btn btn-primary btn-block" id="signup-btn">회원가입</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 2: 일반 User 홈 (생성/취합 탭) -->
+<!-- ========================================================= -->
+<section class="screen" id="screen2">
+  <div class="app-shell">
+    <div class="prompt-hero">
+      <h2>안녕하세요, <span id="greet-name">홍길동</span>님 👋</h2>
+      <p>만들고 싶은 배포용 양식을 자연어로 설명해 주세요.</p>
+      <div class="prompt-box">
+        <textarea id="home-prompt" placeholder="예: 부서별 예산 집행 현황 양식 만들어줘"></textarea>
+        <button class="prompt-send" title="AI 양식 생성으로 이동" onclick="goto('screen3')">
+          <svg class="icon" viewBox="0 0 24 24" style="stroke:#fff;width:18px;height:18px;"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+      <div class="chips">
+        <button class="chip" onclick="fillPrompt(this)">부서별 예산 집행 현황 양식 만들어줘</button>
+        <button class="chip" onclick="fillPrompt(this)">출장비 정산 양식 만들어줘</button>
+        <button class="chip" onclick="fillPrompt(this)">인사평가 취합 양식 만들어줘</button>
+        <button class="chip" onclick="fillPrompt(this)">회의록 취합 양식 만들어줘</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 3: AI 양식 생성 (문답형) -->
+<!-- ========================================================= -->
+<section class="screen" id="screen3">
+  <div class="app-shell">
+    <h1 class="page-title">AI 양식 생성</h1>
+    <p class="page-sub">대상 부서·포함 항목·항목별 입력 형식·필수 여부까지 확인이 끝나야 생성할 수 있어요.</p>
+
+    <div class="gen-layout">
+      <div class="card chat-card">
+        <div class="chat-log" id="chat-log"></div>
+        <div class="chat-input-row">
+          <input class="field-input" id="chat-input" type="text" placeholder="답변을 입력하세요...">
+          <button class="btn btn-primary" onclick="sendChat()">전송</button>
+        </div>
+      </div>
+
+      <div class="card spec-panel">
+        <h3>실시간 사양 요약</h3>
+        <p class="spec-sub">답변할 때마다 카드가 채워집니다.</p>
+        <div class="progress-track"><div class="progress-fill" id="spec-progress"></div></div>
+        <div id="spec-cards">
+          <div class="spec-empty" id="spec-empty-msg">아직 확인된 사양이 없습니다</div>
+        </div>
+        <button class="btn btn-primary btn-block" id="generate-btn" style="margin-top:16px;" disabled>양식 생성하기</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 4: 엑셀 업로드 및 구조 인식 -->
+<!-- ========================================================= -->
+<section class="screen" id="screen4">
+  <div class="app-shell narrow">
+    <div class="subnav-slot"></div>
+    <h1 class="page-title">엑셀 업로드 및 구조 인식</h1>
+    <p class="page-sub">회신받은 엑셀 파일을 업로드하면 시트·헤더·데이터 영역을 자동으로 인식합니다.</p>
+
+    <div class="dropzone" onclick="simulateUpload()">
+      <svg class="icon" viewBox="0 0 24 24" width="32" height="32"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+      <div><b>클릭하여 업로드</b> 또는 파일을 이곳에 끌어다 놓으세요</div>
+      <div style="font-size:12px; margin-top:4px;">xlsx · 파일당 최대 50MB · 1회 최대 30개</div>
+    </div>
+
+    <div id="upload-list"></div>
+    <div id="upload-next" style="text-align:right; margin-top:20px;"></div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 5: 검토 결과 및 취합 범위 선택 -->
+<!-- ========================================================= -->
+<section class="screen" id="screen5">
+  <div class="app-shell narrow">
+    <div class="subnav-slot"></div>
+    <div class="toolbar">
+      <div>
+        <h1 class="page-title" style="margin-bottom:2px;">검토 결과 및 취합 범위 선택</h1>
+        <p class="page-sub" style="margin-bottom:0;">상태 배지를 확인하고 취합에 포함할 파일을 선택하세요.</p>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="alert('오류 리포트(xlsx)를 다운로드합니다.\\n파일명 · 시트 · 셀 위치 · 오류유형 · 사유 · 작성기준 열 포함')">
+        <svg class="icon" viewBox="0 0 24 24" width="15" height="15"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+        오류 리포트 다운로드
+      </button>
+    </div>
+
+    <div class="card" id="review-list"></div>
+
+    <div class="selection-bar">
+      <div class="selection-count">선택된 파일 <b id="sel-count">0</b>/<span id="sel-total">0</span>건</div>
+      <button class="btn btn-primary" id="proceed-btn" onclick="goto('screen6')">취합을 진행하시겠습니까 (0/0)</button>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 6: 합성 모드 선택 -->
+<!-- ========================================================= -->
+<section class="screen" id="screen6">
+  <div class="app-shell">
+    <div class="subnav-slot"></div>
+    <h1 class="page-title">합성 모드 선택</h1>
+    <p class="page-sub">부서 특성에 맞는 합성 방식을 선택하면 아래에서 결과 미리보기를 확인할 수 있습니다.</p>
+
+    <div class="mode-grid" id="mode-grid"></div>
+
+    <div class="card preview-card">
+      <h4><svg class="icon" viewBox="0 0 24 24" width="17" height="17" style="color:var(--primary)"><path d="M3 3h18v18H3z"/><path d="M3 9h18M9 21V9"/></svg> 결과 미리보기 — <span id="preview-mode-name"></span></h4>
+      <div class="sheet-tabs" id="preview-tabs"></div>
+      <div style="overflow-x:auto;"><table class="preview-table" id="preview-table"></table></div>
+    </div>
+
+    <div style="text-align:right; margin-top:20px;">
+      <button class="btn btn-primary" onclick="goto('screen7')">이 모드로 취합 시작 →</button>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 7: 취합 결과 및 다운로드 -->
+<!-- ========================================================= -->
+<section class="screen" id="screen7">
+  <div class="app-shell">
+    <div class="subnav-slot"></div>
+    <h1 class="page-title">취합 결과</h1>
+    <p class="page-sub">취합이 완료되었습니다. 결과 파일과 처리 요약을 확인하세요.</p>
+
+    <div class="metric-grid">
+      <div class="card metric-card">
+        <div class="m-icon" style="background:var(--info-bg);"><svg class="icon" viewBox="0 0 24 24" width="19" height="19" style="color:var(--info-text)"><path d="M4 4h16v16H4z"/><path d="M4 9h16"/></svg></div>
+        <div class="m-num">10</div><div class="m-label">취합 파일</div>
+      </div>
+      <div class="card metric-card">
+        <div class="m-icon" style="background:var(--primary-light);"><svg class="icon" viewBox="0 0 24 24" width="19" height="19" style="color:var(--primary)"><path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/></svg></div>
+        <div class="m-num">5</div><div class="m-label">생성 시트</div>
+      </div>
+      <div class="card metric-card">
+        <div class="m-icon" style="background:var(--warning-bg);"><svg class="icon" viewBox="0 0 24 24" width="19" height="19" style="color:var(--warning-text)"><path d="M12 2l9 16H3z"/><path d="M12 9v4M12 16h.01"/></svg></div>
+        <div class="m-num">12</div><div class="m-label">자동 수정</div>
+      </div>
+      <div class="card metric-card">
+        <div class="m-icon" style="background:var(--danger-bg);"><svg class="icon" viewBox="0 0 24 24" width="19" height="19" style="color:var(--danger-text)"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+        <div class="m-num">3</div><div class="m-label">제외 파일</div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="alert('취합 결과 파일(xlsx)을 다운로드합니다.')">
+      <svg class="icon" viewBox="0 0 24 24" width="15" height="15" style="stroke:#fff;"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+      결과 파일 다운로드
+    </button>
+    <button class="btn btn-outline" style="margin-left:8px;" onclick="alert('취합 리포트(처리 건수 · 제외 파일 · 자동 수정 항목 요약)를 문서로 다운로드합니다.')">
+      <svg class="icon" viewBox="0 0 24 24" width="15" height="15"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg>
+      취합 리포트 작성/다운로드
+    </button>
+
+    <div class="two-col" style="margin-top:26px;">
+      <div class="card">
+        <div style="padding:14px 16px; font-weight:700; font-size:13.5px; border-bottom:1px solid var(--border);">결과 파일 (5)</div>
+        <div class="file-row"><span>종합요약</span><span class="badge badge-info">시트</span></div>
+        <div class="file-row"><span>1월</span><span class="badge badge-info">시트</span></div>
+        <div class="file-row"><span>2월</span><span class="badge badge-info">시트</span></div>
+        <div class="file-row"><span>3월</span><span class="badge badge-info">시트</span></div>
+        <div class="file-row"><span>4월</span><span class="badge badge-info">시트</span></div>
+      </div>
+      <div class="card">
+        <div style="padding:14px 16px; font-weight:700; font-size:13.5px; border-bottom:1px solid var(--border);">제외 파일 (3)</div>
+        <div class="file-row"><span>총무팀_예산.xlsx</span><span class="badge badge-danger">오류 2</span></div>
+        <div class="file-row"><span>시설팀_예산.xlsx</span><span class="badge badge-danger">오류 1</span></div>
+        <div class="file-row"><span>안전팀_예산.xlsx</span><span class="badge badge-danger">오류 3</span></div>
+      </div>
+    </div>
+
+    <div class="section-title">자동 수정 항목</div>
+    <div class="autofix-grid">
+      <div class="autofix-item"><svg class="icon" viewBox="0 0 24 24" width="16" height="16"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg><div><div class="t">날짜 형식 통일</div><div class="d">7건 · YYYY-MM-DD로 변환</div></div></div>
+      <div class="autofix-item"><svg class="icon" viewBox="0 0 24 24" width="16" height="16"><path d="M4 7h16M4 12h10M4 17h7"/></svg><div><div class="t">성명 공백 제거</div><div class="d">3건</div></div></div>
+      <div class="autofix-item"><svg class="icon" viewBox="0 0 24 24" width="16" height="16"><rect x="4" y="4" width="16" height="16" rx="2"/></svg><div><div class="t">완전 중복 행 제거</div><div class="d">2건</div></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 8: 한글(hwpx) 병합 -->
+<!-- ========================================================= -->
+<section class="screen" id="screen8">
+  <div class="app-shell narrow">
+    <div class="subnav-slot"></div>
+    <h1 class="page-title">한글(hwpx) 병합</h1>
+    <p class="page-sub">파일을 드래그하여 병합 순서를 지정하세요.</p>
+
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <span class="count-badge">업로드된 파일 <span id="hwpx-count">0</span>개</span>
+      <button class="btn btn-outline btn-sm" onclick="addHwpxFile()">+ 파일 추가</button>
+    </div>
+
+    <div class="drag-list" id="drag-list"></div>
+    <div class="drag-hint">항목을 클릭한 채로 위아래로 끌어서 순서를 바꿔보세요.</div>
+
+    <button class="btn btn-primary" style="margin-top:20px;" onclick="alert('서버 비동기 병합 작업을 시작합니다. 완료되면 알림을 받게 됩니다.')">병합 시작</button>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 9: 작업 이력 -->
+<!-- ========================================================= -->
+<section class="screen" id="screen9">
+  <div class="app-shell narrow">
+    <h1 class="page-title">작업 이력</h1>
+    <p class="page-sub">보관 기간(90일) 내의 업로드 파일·양식·취합 결과를 조회하고 재사용할 수 있습니다.</p>
+
+    <div class="history-toolbar">
+      <input class="field-input" id="hist-search" type="text" placeholder="파일명 또는 작업명 검색" oninput="renderHistory()">
+      <div class="filter-btns" id="hist-filters">
+        <button class="active" data-type="전체">전체</button>
+        <button data-type="엑셀">엑셀</button>
+        <button data-type="hwpx">hwpx</button>
+      </div>
+    </div>
+
+    <div class="card" id="hist-list"></div>
+  </div>
+</section>
+
+<!-- ========================================================= -->
+<!-- SCREEN 10: Admin 콘솔 -->
+<!-- ========================================================= -->
+<section class="screen" id="screen10">
+  <div class="app-shell">
+    <h1 class="page-title">Admin 콘솔</h1>
+    <p class="page-sub">시스템 사용 현황, 계정 관리, 보관·업로드 정책을 관리합니다. (Admin 전용)</p>
+
+    <div class="metric-grid">
+      <div class="card metric-card"><div class="m-label">전체 작업 건수</div><div class="m-num">1,284</div></div>
+      <div class="card metric-card"><div class="m-label">활성 사용자</div><div class="m-num">137</div></div>
+      <div class="card metric-card"><div class="m-label">API 비용(이번 달)</div><div class="m-num">$342</div></div>
+      <div class="card metric-card"><div class="m-label">보관 용량 사용</div><div class="m-num">64.2GB</div></div>
+    </div>
+
+    <div class="section-title">계정 관리</div>
+    <div class="card" style="overflow-x:auto;">
+      <table class="acc-table">
+        <thead><tr><th>사번</th><th>이름</th><th>이메일</th><th>상태</th><th>액션</th></tr></thead>
+        <tbody>
+          <tr><td>20261001</td><td>홍길동</td><td><span class="email-cell" title="hong.gildong.budget.team.headquarters@organization-longname.co.kr">hong.gildong.budget.team.headquarters@organization-longname.co.kr</span></td><td><span class="badge badge-success">활성</span></td><td><button class="btn btn-outline btn-sm">정지</button></td></tr>
+          <tr><td>20261002</td><td>김민준</td><td><span class="email-cell">minjun.kim@org.co.kr</span></td><td><span class="badge badge-success">활성</span></td><td><button class="btn btn-outline btn-sm">정지</button></td></tr>
+          <tr><td>20261077</td><td>이서연</td><td><span class="email-cell">seoyeon.lee@org.co.kr</span></td><td><span class="badge badge-danger">정지</span></td><td><button class="btn btn-outline btn-sm">승인</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-title">보관·업로드 정책 설정</div>
+    <div class="card policy-grid">
+      <div>
+        <label class="field-label">파일 보관 기간</label>
+        <div class="policy-input-wrap"><input class="field-input" type="number" value="90"><span>일 후 자동 삭제</span></div>
+      </div>
+      <div>
+        <label class="field-label">파일당 업로드 용량 제한</label>
+        <div class="policy-input-wrap"><input class="field-input" type="number" value="50"><span>MB</span></div>
+      </div>
+      <div>
+        <label class="field-label">1회 작업당 최대 파일 수</label>
+        <div class="policy-input-wrap"><input class="field-input" type="number" value="30"><span>개</span></div>
+      </div>
+      <div>
+        <label class="field-label">1회 작업당 총 용량 제한</label>
+        <div class="policy-input-wrap"><input class="field-input" type="number" value="500"><span>MB</span></div>
+      </div>
+    </div>
+    <div style="text-align:right; margin-top:14px;"><button class="btn btn-primary" onclick="alert('정책이 저장되었습니다.')">정책 저장</button></div>
+  </div>
+</section>
+
+<script>
+/* ---------------- nav ---------------- */
+let isAdmin = false;
+const collectGroup = ['screen4','screen5','screen6','screen7'];
+const hwpxGroup = ['screen8'];
+
+function goto(id){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  updateAppBar(id);
+  window.scrollTo(0,0);
+}
+
+/* ---------------- 상단 앱바 (생성/취합/작업이력조회/Admin콘솔) ---------------- */
+function updateAppBar(id){
+  const bar = document.getElementById('appbar');
+  if(id === 'screen1'){ bar.classList.remove('visible'); return; }
+  bar.classList.add('visible');
+  bar.classList.toggle('is-admin', isAdmin);
+  let activeNav = 'create';
+  if(collectGroup.includes(id) || hwpxGroup.includes(id)) activeNav = 'collect';
+  else if(id === 'screen9') activeNav = 'history';
+  else if(id === 'screen10') activeNav = 'admin';
+  document.querySelectorAll('#appbar .appbar-nav button').forEach(b=>b.classList.toggle('active', b.dataset.nav===activeNav));
+  if(collectGroup.includes(id) || hwpxGroup.includes(id)){
+    const slot = document.querySelector('#'+id+' .subnav-slot');
+    if(slot) slot.innerHTML = subnavHtml(id);
+  }
+}
+function subnavHtml(current){
+  const isHwpx = hwpxGroup.includes(current);
+  return '<div class="collect-subnav">'+
+    '<button class="'+(isHwpx?'':'active')+'" onclick="goto(\'screen4\')">엑셀 취합</button>'+
+    '<button class="'+(isHwpx?'active':'')+'" onclick="goto(\'screen8\')">한글(hwpx) 병합</button>'+
+  '</div>';
+}
+function logout(){
+  isAdmin = false;
+  goto('screen1');
+}
+
+/* ---------------- Screen 1: auth tabs ---------------- */
+document.querySelectorAll('[data-auth-tab]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('[data-auth-tab]').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('login-panel').classList.toggle('active', btn.dataset.authTab==='login');
+    document.getElementById('signup-panel').classList.toggle('active', btn.dataset.authTab==='signup');
+  });
+});
+
+/* ---------------- Screen 1: login/signup actions ---------------- */
+document.getElementById('login-btn').addEventListener('click', ()=>{
+  const empNo = document.getElementById('login-empno').value.trim() || '20261234';
+  isAdmin = document.getElementById('demo-admin-check').checked;
+  document.getElementById('appbar-empno').textContent = empNo;
+  goto('screen2');
+});
+document.getElementById('signup-btn').addEventListener('click', ()=>{
+  alert('회원가입이 완료되었습니다. 로그인해주세요.');
+  document.querySelector('[data-auth-tab="login"]').click();
+});
+
+/* ---------------- Screen 2: prompt chips ---------------- */
+function fillPrompt(el){ document.getElementById('home-prompt').value = el.textContent; }
+
+/* ---------------- Screen 3: chat flow ---------------- */
+const chatSteps = [
+  {ai:"안녕하세요! 어떤 양식을 만들어 드릴까요? (예: 부서별 예산 집행 현황 양식)", label:"양식명"},
+  {ai:"이 양식을 받을 대상 부서를 알려주세요. (예: 전체 부서 / 기획팀·인사팀·총무팀)", label:"대상 부서"},
+  {ai:"양식에 포함할 항목을 알려주세요. (예: 부서명, 담당자, 집행금액, 집행일자)", label:"포함 항목"},
+  {ai:"'집행일자' 항목의 날짜 표기 형식은 어떻게 할까요? (예: YYYY-MM-DD)", label:"날짜 형식 (집행일자)"},
+  {ai:"'집행금액'은 숫자만 입력하나요, 천 단위 구분기호를 사용하나요?", label:"금액 형식 (집행금액)"},
+  {ai:"마지막으로 필수 항목과 선택 항목을 구분해주세요. (예: 부서명·집행일자는 필수, 비고는 선택)", label:"필수/선택 구분"}
+];
+let chatStep = 0;
+function addBubble(text, who){
+  const log = document.getElementById('chat-log');
+  const b = document.createElement('div');
+  b.className = 'bubble '+who;
+  b.textContent = text;
+  log.appendChild(b);
+  log.scrollTop = log.scrollHeight;
+}
+function addSpecCard(label, value){
+  const empty = document.getElementById('spec-empty-msg');
+  if(empty) empty.remove();
+  const wrap = document.getElementById('spec-cards');
+  const c = document.createElement('div');
+  c.className = 'spec-card';
+  c.innerHTML = '<div class="k">'+label+'</div><div class="v">'+value+'</div>';
+  wrap.appendChild(c);
+  document.getElementById('spec-progress').style.width = Math.round((chatStep/chatSteps.length)*100)+'%';
+}
+function sendChat(){
+  const input = document.getElementById('chat-input');
+  const val = input.value.trim();
+  if(!val) return;
+  addBubble(val, 'user');
+  addSpecCard(chatSteps[chatStep].label, val);
+  input.value = '';
+  chatStep++;
+  if(chatStep < chatSteps.length){
+    setTimeout(()=>addBubble(chatSteps[chatStep].ai, 'ai'), 300);
+  } else {
+    setTimeout(()=>{
+      addBubble('필요한 사양을 모두 확인했습니다! 우측 사양 카드를 확인하시고 "양식 생성하기" 버튼을 눌러주세요.', 'ai');
+      document.getElementById('generate-btn').disabled = false;
+      document.getElementById('spec-progress').style.width = '100%';
+    }, 300);
+  }
+}
+document.getElementById('chat-input').addEventListener('keydown', e=>{ if(e.key==='Enter') sendChat(); });
+document.getElementById('generate-btn').addEventListener('click', ()=>{
+  alert('양식(xlsx)과 작성 기준이 생성되었습니다.');
+});
+addBubble(chatSteps[0].ai, 'ai');
+
+/* ---------------- Screen 4: upload simulation ---------------- */
+const uploadFiles = [
+  {name:'기획팀_예산현황.xlsx', sheets:['1월','2월','3월'], status:'ok'},
+  {name:'인사팀_예산현황.xlsx', sheets:['1월','2월'], status:'ok'},
+  {name:'총무팀_예산현황.xlsx', sheets:['1월','2월','3월','4월'], status:'check'}
+];
+let uploaded = false;
+function simulateUpload(){
+  if(uploaded) return;
+  uploaded = true;
+  const list = document.getElementById('upload-list');
+  uploadFiles.forEach((f,i)=>{
+    setTimeout(()=>{
+      const el = document.createElement('div');
+      el.className = 'card file-item';
+      const badge = f.status==='ok'
+        ? '<span class="badge badge-success">인식 완료</span>'
+        : '<span class="badge badge-warning">확인 필요</span>';
+      el.innerHTML = '<div class="file-item-head"><span class="file-item-name">'+f.name+'</span>'+badge+'</div>'+
+        '<div class="sheet-list">'+f.sheets.map(s=>'<span class="sheet-tag">'+s+'</span>').join('')+'</div>';
+      list.appendChild(el);
+      if(i === uploadFiles.length-1){
+        document.getElementById('upload-next').innerHTML =
+          '<button class="btn btn-primary" onclick="goto(\'screen5\')">검토 결과 확인하기 →</button>';
+      }
+    }, i*180);
+  });
+}
+
+/* ---------------- Screen 5: review list ---------------- */
+const reviewFiles = [
+  {name:'기획팀_예산현황.xlsx', badge:'ok', issues:[]},
+  {name:'인사팀_예산현황.xlsx', badge:'ok', issues:[]},
+  {name:'총무팀_예산현황.xlsx', badge:'warn', n:2, issues:[
+    {type:'정합성', count:1, loc:"'2월'!D5", reason:'날짜 표기가 "26.3.2"로 자동 변환 가능한 형식 불일치'},
+    {type:'중복', count:1, loc:"'1월'!12행", reason:'완전 동일한 행이 2회 입력되어 자동 제거 가능'}
+  ]},
+  {name:'시설팀_예산현황.xlsx', badge:'error', n:2, issues:[
+    {type:'누락', count:1, loc:"'3월'!C8", reason:'필수값(집행금액) 공란'},
+    {type:'충돌', count:1, loc:"'1월'!B3", reason:'동일 사번의 부서명이 다른 파일과 상이'}
+  ]},
+  {name:'안전팀_예산현황.xlsx', badge:'error', n:3, issues:[
+    {type:'구조', count:1, loc:"시트 'Sheet1'", reason:'헤더 인식 실패로 구조 불일치'},
+    {type:'누락', count:2, loc:"'2월'!전체", reason:'시트 누락(2월 실적 미제출)'}
+  ]},
+  {name:'홍보팀_예산현황.xlsx', badge:'ok', issues:[]},
+  {name:'감사팀_예산현황.xlsx', badge:'warn', n:1, issues:[
+    {type:'정합성', count:1, loc:"'1월'!E9", reason:'성명 항목에 공백 포함, 자동 제거 가능'}
+  ]}
+];
+function badgeHtml(f){
+  if(f.badge==='ok') return '<span class="badge badge-success">정상</span>';
+  if(f.badge==='warn') return '<span class="badge badge-warning">경고 '+f.n+'</span>';
+  return '<span class="badge badge-danger">오류 '+f.n+'</span>';
+}
+function renderReview(){
+  const wrap = document.getElementById('review-list');
+  wrap.innerHTML = '';
+  reviewFiles.forEach((f, idx)=>{
+    const row = document.createElement('div');
+    row.className = 'row-file';
+    row.id = 'rf-'+idx;
+    const checked = f.badge !== 'error';
+    const detailHtml = f.issues.length ? f.issues.map(is=>
+      '<div class="detail-item"><span class="dt-type">'+is.type+'</span><span>'+is.count+'건</span><span class="dt-loc">'+is.loc+'</span><span>'+is.reason+'</span></div>'
+    ).join('') : '<div style="font-size:12.5px; color:var(--text-faint); padding:6px 0;">세부 이상값 없음</div>';
+    row.innerHTML =
+      '<div class="row-main">'+
+        '<input type="checkbox" data-idx="'+idx+'" '+(checked?'checked':'')+' onclick="event.stopPropagation(); updateSelection()">'+
+        '<span class="fname">'+f.name+'</span>'+
+        badgeHtml(f)+
+        '<svg class="icon chev" viewBox="0 0 24 24" width="16" height="16"><path d="M9 6l6 6-6 6"/></svg>'+
+      '</div>'+
+      '<div class="row-detail">'+detailHtml+'</div>';
+    row.querySelector('.row-main').addEventListener('click', (e)=>{
+      if(e.target.tagName==='INPUT') return;
+      row.classList.toggle('expanded');
+    });
+    wrap.appendChild(row);
+  });
+  updateSelection();
+}
+function updateSelection(){
+  const boxes = document.querySelectorAll('#review-list input[type=checkbox]');
+  const total = boxes.length;
+  const checked = Array.from(boxes).filter(b=>b.checked).length;
+  document.getElementById('sel-count').textContent = checked;
+  document.getElementById('sel-total').textContent = total;
+  document.getElementById('proceed-btn').textContent = '취합을 진행하시겠습니까 ('+checked+'/'+total+')';
+}
+renderReview();
+
+/* ---------------- Screen 6: synthesis modes ---------------- */
+const modes = {
+  A:{name:'원본 보존형', desc:'부서별 시트를 원본 그대로 유지하며 하나의 파일로 합성합니다. 결과 시트 개수는 부서 수 × 시트 수입니다.',
+     tabs:['기획팀_1월','기획팀_2월','인사팀_1월','인사팀_2월'],
+     head:['부서','항목','금액'], rows:[['기획팀','인건비','1,200,000'],['인사팀','인건비','980,000']]},
+  B:{name:'시트명 통합형', desc:'시트명이 동일한 시트끼리 부서별 데이터를 세로로 누적하고 "부서" 구분 컬럼을 추가합니다. 결과 시트 개수는 부서 시트 종류 수와 같습니다.',
+     tabs:['1월','2월'],
+     head:['부서','항목','금액'], rows:[['기획팀','인건비','1,200,000'],['인사팀','인건비','980,000'],['총무팀','인건비','1,050,000']]},
+  C:{name:'그룹 통합형', desc:'사전 정의된 그룹 매핑(시트명→그룹명)에 따라 여러 시트를 그룹 단위로 재편성해 통합하고, "구분"(원 시트명)·"부서" 컬럼을 추가합니다.',
+     tabs:['예산그룹','인사그룹'],
+     head:['구분','부서','항목','금액'], rows:[['1월','기획팀','인건비','1,200,000'],['2월','인사팀','인건비','980,000']]},
+  D:{name:'원본보존+요약형', desc:'모드 B의 결과 구조를 유지하며, 부서별 핵심 지표를 SUMIF/SUMIFS 수식으로 집계하는 "종합요약" 시트를 최상단에 추가합니다.',
+     tabs:['종합요약','1월','2월'],
+     head:['부서','합계(수식)'], rows:[['기획팀','=SUMIF(1월!A:A,"기획팀",1월!C:C)'],['인사팀','=SUMIF(1월!A:A,"인사팀",1월!C:C)']], summary:true}
+};
+let selectedMode = 'B';
+function renderModes(){
+  const grid = document.getElementById('mode-grid');
+  grid.innerHTML = '';
+  Object.keys(modes).forEach(key=>{
+    const m = modes[key];
+    const card = document.createElement('div');
+    card.className = 'card mode-card'+(key===selectedMode?' selected':'');
+    card.innerHTML = '<svg class="icon check" viewBox="0 0 24 24" width="18" height="18"><path d="M20 6L9 17l-5-5"/></svg>'+
+      '<div class="mode-letter">'+key+'</div><h4>'+m.name+'</h4><p>'+m.desc+'</p>';
+    card.addEventListener('click', ()=>{ selectedMode = key; renderModes(); renderPreview(); });
+    grid.appendChild(card);
+  });
+}
+function renderPreview(){
+  const m = modes[selectedMode];
+  document.getElementById('preview-mode-name').textContent = '모드 '+selectedMode+' · '+m.name;
+  document.getElementById('preview-tabs').innerHTML = m.tabs.map(t=>'<span>'+t+'</span>').join('');
+  const table = document.getElementById('preview-table');
+  let html = '<tr>'+m.head.map(h=>'<th>'+h+'</th>').join('')+'</tr>';
+  m.rows.forEach((r, i)=>{
+    const cls = (m.summary) ? 'summary-row' : '';
+    html += '<tr class="'+cls+'">'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>';
+  });
+  table.innerHTML = html;
+}
+renderModes(); renderPreview();
+
+/* ---------------- Screen 8: drag reorder ---------------- */
+let hwpxFiles = [
+  {name:'1분기_예산보고서.hwpx', size:'2.1MB'},
+  {name:'2분기_예산보고서.hwpx', size:'1.8MB'},
+  {name:'3분기_예산보고서.hwpx', size:'2.4MB'},
+  {name:'4분기_예산보고서.hwpx', size:'1.9MB'}
+];
+let dragSrcIdx = null;
+function renderDragList(){
+  const wrap = document.getElementById('drag-list');
+  wrap.innerHTML = '';
+  document.getElementById('hwpx-count').textContent = hwpxFiles.length;
+  hwpxFiles.forEach((f, idx)=>{
+    const item = document.createElement('div');
+    item.className = 'drag-item';
+    item.draggable = true;
+    item.dataset.idx = idx;
+    item.innerHTML = '<span class="order-num">'+(idx+1)+'</span>'+
+      '<svg class="icon grip" viewBox="0 0 24 24" width="16" height="16"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg>'+
+      '<span class="fname">'+f.name+'</span><span class="fsize">'+f.size+'</span>';
+    item.addEventListener('dragstart', e=>{ dragSrcIdx = idx; item.classList.add('dragging'); });
+    item.addEventListener('dragend', e=>{ item.classList.remove('dragging'); });
+    item.addEventListener('dragover', e=>{ e.preventDefault(); });
+    item.addEventListener('drop', e=>{
+      e.preventDefault();
+      const targetIdx = idx;
+      if(dragSrcIdx===null || dragSrcIdx===targetIdx) return;
+      const moved = hwpxFiles.splice(dragSrcIdx,1)[0];
+      hwpxFiles.splice(targetIdx,0,moved);
+      dragSrcIdx = null;
+      renderDragList();
+    });
+    wrap.appendChild(item);
+  });
+}
+function addHwpxFile(){
+  const n = hwpxFiles.length+1;
+  hwpxFiles.push({name:n+'_추가보고서.hwpx', size:(1+Math.floor((n*37)%3))+'.'+((n*13)%9)+'MB'});
+  renderDragList();
+}
+renderDragList();
+
+/* ---------------- Screen 9: history filter ---------------- */
+const historyItems = [
+  {name:'부서별_예산현황_취합.xlsx', type:'엑셀', date:'2026-07-18'},
+  {name:'예산집행_양식.xlsx', type:'엑셀', date:'2026-07-15'},
+  {name:'1분기_보고서_병합.hwpx', type:'hwpx', date:'2026-07-10'},
+  {name:'출장비_정산_취합.xlsx', type:'엑셀', date:'2026-07-02'},
+  {name:'인사평가_취합.xlsx', type:'엑셀', date:'2026-06-28'},
+  {name:'전사_보고서_병합.hwpx', type:'hwpx', date:'2026-06-20'}
+];
+let histType = '전체';
+document.querySelectorAll('#hist-filters button').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('#hist-filters button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    histType = btn.dataset.type;
+    renderHistory();
+  });
+});
+function renderHistory(){
+  const q = document.getElementById('hist-search').value.trim().toLowerCase();
+  const list = document.getElementById('hist-list');
+  const filtered = historyItems.filter(h=>
+    (histType==='전체' || h.type===histType) && h.name.toLowerCase().includes(q)
+  );
+  if(!filtered.length){
+    list.innerHTML = '<div class="hist-empty">조건에 맞는 작업 이력이 없습니다.</div>';
+    return;
+  }
+  list.innerHTML = filtered.map(h=>{
+    const isExcel = h.type==='엑셀';
+    const iconBg = isExcel ? 'var(--success-bg)' : 'var(--info-bg)';
+    const iconColor = isExcel ? 'var(--success-text)' : 'var(--info-text)';
+    return '<div class="hist-row">'+
+      '<div class="hist-icon" style="background:'+iconBg+';"><svg class="icon" viewBox="0 0 24 24" width="17" height="17" style="color:'+iconColor+';"><path d="M4 4h16v16H4z"/><path d="M4 9h16"/></svg></div>'+
+      '<div class="hist-main"><div class="hist-name">'+h.name+'</div><div class="hist-meta">'+h.type+' · '+h.date+'</div></div>'+
+      '<button class="btn btn-outline btn-sm">재사용</button>'+
+    '</div>';
+  }).join('');
+}
+renderHistory();
+</script>
+</body>
+</html>
