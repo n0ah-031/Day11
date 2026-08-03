@@ -209,6 +209,86 @@ def test_image_anchor_relocation(tmp: Path):
     print("  ✓ 이미지 anchor 재배치(행·열 추종 + 표시 크기 보존)")
 
 
+def test_real_form_structure(tmp: Path):
+    """실제 업무 양식 구조에서 오탐이 없어야 한다.
+
+    실제 회신 파일(지사별 자체점검 리스트)에서 확인된 네 가지를 그대로 재현한다.
+    이 구조에서 종전 엔진은 8개 파일 전부를 '오류'로 판정해 아무것도 취합되지
+    않았다.
+      ① 첫 시트가 '작성 주의사항' 안내문 — 표가 아님
+      ② 제목 행(병합) + 안내 행 뒤 4행에 헤더
+      ③ 지사·개소가 세로 병합 — 파일에는 첫 칸만 값이 있다
+      ④ 표 끝에 '합 계' 행과 '*' 각주 행
+    """
+    path = tmp / "판교지사.xlsx"
+    wb = openpyxl.Workbook()
+
+    guide = wb.active
+    guide.title = "작성 주의사항"
+    guide["A1"] = "집중안전점검 사업장 자체점검 작성 안내"
+    guide.merge_cells("A1:L1")
+    for r, text in enumerate(["ㅇ 해당지사 : 전 지사", "ㅇ 주의사항", "1. 매달 취합합니다"], start=3):
+        guide.cell(row=r, column=1, value=text)
+
+    ws = wb.create_sheet("2025년 대상 리스트")
+    ws["A1"] = "2025년 집중안전점검 지열지점 사업장 자체점검 리스트"
+    ws.merge_cells("A1:H1")
+    ws["A3"] = "  ※ 2024.11.01.~2025.04.30. 기간 기준"
+    for c, h in enumerate(["지사", "개소", "위치", "관경(A)", "준공연도", "온도차(℃)", "보수여부"], start=1):
+        ws.cell(row=4, column=c, value=h)
+    ws["A5"], ws["B5"] = "판교지사", 2
+    ws.merge_cells("A5:A7")          # 지사가 세 행에 걸쳐 병합
+    ws.merge_cells("B5:B7")
+    for i, (loc, dia, year, temp, fix) in enumerate([
+        ("백현동 555-2", 200, 2015, 24.7, "보수완료"),
+        ("삼평동 672-6", 150, 2015, 3.1, "보수완료"),
+        ("판교동 12-3", 300, 2016, 5.5, "보수중"),
+    ]):
+        ws.cell(row=5 + i, column=3, value=loc)
+        ws.cell(row=5 + i, column=4, value=dia)
+        ws.cell(row=5 + i, column=5, value=year)
+        ws.cell(row=5 + i, column=6, value=temp)
+        ws.cell(row=5 + i, column=7, value=fix)
+    ws["A9"], ws["B9"] = "합 계", 2                       # 합계 행
+    ws["A10"] = " *  해당기간 내 점검 완료분만 기재"        # 각주 행
+    # 양식은 아래쪽까지 미리 병합해 둔다 — 여기에 값이 새면 빈 행이 데이터로 살아난다
+    ws.merge_cells("A12:A30")
+    ws.merge_cells("B12:B30")
+    wb.save(path)
+
+    uf = ag.read_file(path)
+    assert uf.readable, uf.issues
+    # 안내 시트는 취합 대상에서 빠지고, 데이터 시트만 남는다
+    assert [s.name for s in uf.sheets] == ["2025년 대상 리스트"], [s.name for s in uf.sheets]
+    sheet = uf.sheets[0]
+    assert sheet.header_row == 4, sheet.header_row
+    assert sheet.headers[:3] == ["지사", "개소", "위치"], sheet.headers
+    # 합계·각주 행은 제외, 미리 병합해 둔 빈 행은 되살아나지 않는다
+    assert sheet.row_numbers == [5, 6, 7], sheet.row_numbers
+    # 세로 병합된 지사·개소가 세 행 모두 채워진다
+    assert [r[0] for r in sheet.rows] == ["판교지사"] * 3, [r[0] for r in sheet.rows]
+    assert [r[1] for r in sheet.rows] == [2, 2, 2], [r[1] for r in sheet.rows]
+
+    ag.review_stage1(uf, rules={})
+    errors = [i for i in uf.issues if i.grade == ag.ERROR]
+    assert not errors, [i.line() for i in errors]
+    assert uf.grade == ag.WARN, [i.line() for i in uf.issues]
+    # 등급이 오류가 아니므로 취합에 기본 포함된다 (§7)
+    reasons = " ".join(i.reason for i in uf.issues)
+    assert "표 구조가 아니어서" in reasons and "합계·각주" in reasons, reasons
+
+    # 첫 컬럼(지사)이 반복되어도 키 충돌로 오탐하지 않는다 — 고유한 '위치'를 키로 잡는다
+    assert ag._pick_key_column(sheet.headers, sheet.rows) == 2, sheet.headers
+
+    # 합계 행이 취합에 섞이면 모드 B/D에서 이중 계상된다
+    result, _ = ag.synthesize([uf], "B", {}, [])
+    body = result["2025년 대상 리스트"]
+    assert body.max_row == 4, body.max_row          # 헤더 1 + 데이터 3
+    assert all(str(body.cell(row=r, column=2).value).replace(" ", "") not in ("합계", "계")
+               for r in range(2, body.max_row + 1))
+    print("  ✓ 실제 업무 양식 구조(안내 시트·세로 병합·합계·각주 행)")
+
+
 def test_stage2_parallel(tmp: Path):
     """2단계는 파일 간 병렬로 돌고, 한 파일의 실패가 다른 파일을 오염시키지 않는다.
 
@@ -313,7 +393,8 @@ def main() -> int:
     try:
         for fn in (test_structure_and_stage1, test_clean_file_and_gating,
                    test_rules_and_masking, test_synthesis_modes,
-                   test_image_anchor_relocation, test_stage2_parallel,
+                   test_image_anchor_relocation, test_real_form_structure,
+                   test_stage2_parallel,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()

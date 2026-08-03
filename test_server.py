@@ -124,17 +124,22 @@ def test_upload_rejected():
 
 
 def test_key_column():
-    """첫 컬럼이 반복되면 키 충돌로 오탐 → key_col로 고유 컬럼을 지정하면 정상."""
+    """자동 판정은 고유 컬럼을 키로 잡고, key_col 지정이 그것을 덮어쓴다 (F2-13)."""
     sid = new_session()
     files = wait(upload(sid, [("영업부.xlsx", book_bytes(REPEATED))]))["files"]
     assert files[0]["sheets"][0]["headers"] == ["부서", "성명", "예산액"], files
 
+    # 첫 컬럼(부서)이 행마다 반복되지만, 자동 판정이 고유한 '성명'을 키로 잡아
+    # 충돌 오탐이 나지 않는다. 종전에는 첫 컬럼을 그냥 키로 삼아 '이상'이었다
     data = wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True}))
-    assert data["files"][0]["status"] == "이상", data["files"][0]
-
-    data = wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True, "key_col": "성명"}))
     assert data["files"][0]["status"] == "정상", data["files"][0]
-    print("  ✓ key_col 지정으로 키 충돌 오탐 해소")
+
+    # 사용자가 반복되는 컬럼을 키로 지정하면 그 판단이 우선한다 → 충돌로 잡힌다
+    data = wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True, "key_col": "부서"}))
+    bad = data["files"][0]
+    assert bad["status"] == "이상", bad
+    assert any("충돌" in i["message"] or "키" in i["message"] for i in bad["issues"]), bad["issues"]
+    print("  ✓ 키 컬럼 자동 판정(고유 컬럼) + key_col 지정이 우선")
 
 
 def test_optional_columns():

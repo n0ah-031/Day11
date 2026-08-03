@@ -38,6 +38,9 @@ IMAGE_MAX_SIZE_MB = 10
 IMAGE_MIN_RESOLUTION = (200, 200)
 IMAGE_MAX_COUNT_PER_KEY = 1
 SHEET_NAME_LIMIT = 31            # 엑셀 시트명 상한 (§9 모드 A 자르기 규칙)
+# 실제 업무 양식의 표 끝에 붙는 행들 — 레코드가 아니라 표 장식이다
+TOTAL_LABELS = ("합계", "소계", "총계", "누계", "총합계", "계")
+NOTE_PREFIXES = ("*", "※", "주)", "비고)", "◦", "ㅇ", "•")
 
 ERROR, WARN, OK = "오류", "경고", "정상"
 GRADE_ORDER = {ERROR: 2, WARN: 1, OK: 0}   # §7 대표 등급 = 최악 등급
@@ -139,6 +142,24 @@ def _is_blank(value) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _is_summary_or_note(row: list) -> bool:
+    """합계 행·각주 행인지. 데이터 레코드가 아니므로 취합에서 뺀다.
+
+    합계 행을 레코드로 취급하면 오탐(빈 칸이 필수값 누락으로 잡힘)에 그치지 않고,
+    부서별로 세로 누적하는 모드 B/D에서 합계가 한 번 더 더해져 결과가 틀린다.
+    """
+    filled = [v for v in row if not _is_blank(v)]
+    if not filled:
+        return False
+    head = str(row[0]).replace(" ", "").strip() if not _is_blank(row[0]) else ""
+    if head in TOTAL_LABELS:
+        return True
+    # 칸 하나에 안내 문구만 있는 행 (표 아래 각주)
+    if len(filled) == 1 and isinstance(filled[0], str):
+        return filled[0].strip().startswith(NOTE_PREFIXES)
+    return False
+
+
 def _looks_like_data(row: list) -> bool:
     """헤더 후보 다음 행이 데이터인지: 숫자/날짜가 하나라도 섞여 있으면 데이터로 본다 (§2.2)."""
     return any(not isinstance(v, str) and not _is_blank(v) for v in row)
@@ -224,27 +245,30 @@ def read_file(path: Path, include_hidden: bool = False) -> UploadedFile:
                                "해결방법: 엑셀에서 정상적으로 열리는지, 암호가 걸려있지 않은지 확인 후 재시도."))
         return uf
 
+    skipped: list[Issue] = []           # 표가 아닌 시트 — 유효한 시트가 하나도 없을 때만 오류로 올린다
     for ws in wb.worksheets:
         if ws.sheet_state != "visible" and not include_hidden:
             continue
         grid = [list(r) for r in ws.iter_rows(values_only=True)]
         images = _read_images(ws)
         if not any(not _is_blank(v) for row in grid for v in row) and not images:
-            uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
-                                   "시트에 데이터가 없습니다. 해결방법: 빈 시트를 삭제하거나 데이터를 입력 후 재시도."))
+            skipped.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
+                                 "시트에 데이터가 없습니다. 해결방법: 빈 시트를 삭제하거나 데이터를 입력 후 재시도."))
             continue
         hi = _find_header(grid)
         if hi < 0:
-            uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
-                                   "헤더(열 제목) 행을 찾을 수 없습니다. 해결방법: 제목·로고 행과 데이터 사이에 "
-                                   "명확한 열 제목 행이 있는지 확인해주세요."))
+            skipped.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
+                                 "헤더(열 제목) 행을 찾을 수 없습니다. 해결방법: 제목·로고 행과 데이터 사이에 "
+                                 "명확한 열 제목 행이 있는지 확인해주세요."))
             continue
 
         headers = [str(v).strip() if not _is_blank(v) else "" for v in grid[hi]]
         while headers and headers[-1] == "":
             headers.pop()
+        merged = [(r.min_row, r.min_col, r.max_row, r.max_col) for r in ws.merged_cells.ranges]
         rows: list[list] = []
         row_numbers: list[int] = []
+        dropped: list[int] = []
         blank_run = 0
         for j in range(hi + 1, len(grid)):
             row = list(grid[j])[:len(headers)] + [None] * max(0, len(headers) - len(grid[j]))
@@ -254,16 +278,71 @@ def read_file(path: Path, include_hidden: bool = False) -> UploadedFile:
                     break
                 continue
             blank_run = 0
+            if _is_summary_or_note(row):
+                dropped.append(j + 1)
+                continue
             rows.append(row)
             row_numbers.append(j + 1)
+        # 어떤 행이 데이터인지는 원본 기준으로 먼저 정하고, 병합 값은 그 뒤에 채운다.
+        # 순서가 바뀌면 미리 병합해 둔 빈 템플릿 행까지 값이 생겨 데이터로 되살아난다.
+        _fill_merged(rows, row_numbers, merged)
+        if dropped:
+            uf.issues.append(Issue(path.name, ws.title, f"{dropped[0]}행" if len(dropped) == 1
+                                   else f"{dropped[0]}~{dropped[-1]}행",
+                                   "정합성", "1단계", WARN,
+                                   f"합계·각주로 보이는 {len(dropped)}개 행을 취합에서 제외했습니다"
+                                   f"(행 {', '.join(map(str, dropped))}). 데이터 행이라면 "
+                                   "첫 칸의 '합계' 같은 표기를 지워주세요."))
         if not rows:
-            uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "누락", "1단계", ERROR,
-                                   "헤더는 있으나 입력된 데이터가 없습니다. 해결방법: 데이터를 입력 후 재시도."))
+            skipped.append(Issue(path.name, ws.title, "(해당없음)", "누락", "1단계", ERROR,
+                                 "헤더는 있으나 입력된 데이터가 없습니다. 해결방법: 데이터를 입력 후 재시도."))
             continue
-        merged = [(r.min_row, r.min_col, r.max_row, r.max_col) for r in ws.merged_cells.ranges]
         uf.sheets.append(SheetData(ws.title, hi + 1, headers, rows, row_numbers, images,
                                    merged=merged))
+
+    # 취합할 시트가 하나라도 있으면, 표가 아닌 시트는 파일을 막을 사유가 아니다.
+    # 실제 업무 양식에는 '작성 주의사항'처럼 안내문만 있는 시트가 흔하다 —
+    # 이걸 오류로 보면 파일 전체가 '이상'이 되어 취합에서 기본 제외된다(§7).
+    if uf.sheets:
+        for issue in skipped:
+            uf.issues.append(Issue(issue.file, issue.sheet, issue.cell, issue.kind, issue.stage,
+                                   WARN, "표 구조가 아니어서 취합에서 제외했습니다"
+                                         "(작성 안내·빈 시트 등). 취합 대상 시트라면 "
+                                         "제목 행과 데이터 사이에 열 제목 행이 있는지 확인해주세요."))
+    else:
+        uf.issues.extend(skipped)
     return uf
+
+
+def _fill_merged(rows: list[list], row_numbers: list[int],
+                 merged: list[tuple[int, int, int, int]]) -> None:
+    """병합 셀의 값을 그 범위에 속한 데이터 행에 채운다.
+
+    엑셀에서 세로로 병합된 칸은 사람 눈에는 구간 전체의 값이지만, 파일에는
+    좌상단 한 칸만 값이 있고 나머지는 비어 있다. 채우지 않으면 실제 업무 양식의
+    '지사'·'개소'처럼 여러 행에 걸친 칸이 전부 필수값 누락으로 잡힌다.
+
+    이미 데이터로 확정된 행만 대상이다 — 양식이 미리 병합해 둔 빈 행까지 채우면
+    값이 생겨 데이터 행으로 되살아난다(실제 양식은 5~60행을 미리 병합해 둔다).
+    """
+    if not rows:
+        return
+    index_of = {number: i for i, number in enumerate(row_numbers)}
+    for min_row, min_col, max_row, max_col in merged:
+        if min_row == max_row and min_col == max_col:
+            continue
+        source = index_of.get(min_row)
+        if source is None:
+            continue                       # 병합 시작 행이 데이터가 아니면(제목 등) 건너뛴다
+        width = len(rows[source])
+        for c in range(min_col - 1, min(max_col, width)):
+            value = rows[source][c]
+            if _is_blank(value):
+                continue
+            for number in range(min_row, max_row + 1):
+                target = index_of.get(number)
+                if target is not None and _is_blank(rows[target][c]):
+                    rows[target][c] = value
 
 
 # ── 3. 데이터 유형 분류 ───────────────────────────────────────────────────────
@@ -386,11 +465,24 @@ def _validate_number(raw, rule: dict):
     return None, "", None
 
 
-def _pick_key_column(headers: list[str]) -> int:
+def _pick_key_column(headers: list[str], rows: list[list] | None = None) -> int:
+    """중복·충돌 판정의 기준 컬럼을 고른다 (F2-13의 `자동`).
+
+    ① 헤더에 사번·코드 같은 키워드가 있으면 그 컬럼
+    ② 없으면 값이 행마다 고유한 첫 컬럼 — 실제 업무 양식은 첫 컬럼이 지사·부서명처럼
+       반복되는 경우가 흔해서, 첫 컬럼을 그냥 키로 삼으면 전 행이 충돌로 오탐된다
+    ③ 그래도 못 찾으면 첫 컬럼 (사용자가 화면에서 지정하는 것이 최선)
+    """
     for idx, header in enumerate(headers):
         if any(k in header.lower() for k in KEY_KEYWORDS):
             return idx
-    return 0        # ponytail: 키 컬럼 미지정 시 첫 컬럼. rules.json의 "key": true로 상시 재지정 가능
+    if rows:
+        for idx in range(len(headers)):
+            values = [str(r[idx]).strip() for r in rows
+                      if idx < len(r) and not _is_blank(r[idx])]
+            if len(values) == len(rows) and len(set(values)) == len(values):
+                return idx
+    return 0
 
 
 def review_stage1(uf: UploadedFile, rules: dict) -> None:
@@ -435,7 +527,7 @@ def _review_duplicates(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
     if not sheet.headers:
         return
     key_idx = next((i for i, h in enumerate(sheet.headers) if rules.get(h, {}).get("key")),
-                   _pick_key_column(sheet.headers))
+                   _pick_key_column(sheet.headers, sheet.rows))
     letter = get_column_letter(key_idx + 1)
     groups: dict[str, list[int]] = {}
     for i, row in enumerate(sheet.rows):
