@@ -2,32 +2,36 @@
 
 | 항목 | 내용 |
 |---|---|
-| 작성일 | 2026-08-03 (갱신) |
+| 작성일 | 2026-08-03 (2차 갱신) |
 | 브랜치 | `claude/handoff-work-progress-f416b0` (이전: `claude/day11-handoff-continuation-2021a1`, `claude/docs-aggregation-program-31c2ae`) |
 | 기준 문서 | [docs/PRD_v1.9.md](docs/PRD_v1.9.md) (최신), [docs/취합기능_기술명세_v0.1.md](docs/취합기능_기술명세_v0.1.md), [docs/design.md](docs/design.md) |
-| 상태 | **로그인 → 업로드 → 검토 → 취합 → 다운로드 전 구간 동작.** 브라우저 실측 확인 완료. 인증(F4-1) 연결, 종전 미검증 2건(이미지 anchor·대량 성능) 해소 |
+| 상태 | **로그인 → 업로드 → 검토 → 취합 → 다운로드 → 이력 전 구간 동작.** F2 취합 + F4-1 인증 + F4-2 이력 + F4-3 Admin 콘솔 구현, Supabase 영속화 연결. **실제 업무 파일 8개로 검증** 완료 |
 
 ---
 
-## 0. 먼저 할 일 — 본인 API 키 설정
+## 0. 먼저 할 일 — `.env` 확인
 
-**이 저장소에는 API 키가 없습니다.** `.env`는 `.gitignore`에 등록되어 커밋되지 않으므로, 이어받는 쪽에서 직접 만들어야 합니다.
-
-저장소 루트에 `.env` 파일을 만들고 아래 한 줄을 넣으세요(값은 본인 OpenAI 키):
+`.env`는 `.gitignore`에 등록되어 **커밋되지 않습니다.** 같은 머신에서 이어받으면 이미 있고, 다른 머신이면 새로 만들어야 합니다.
 
 ```
 OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-5-mini
+SUPABASE_URL=https://cfchnprkizcmfymlezyo.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SERVICE_ROLE_KEY=eyJ...
 ```
 
-- 키를 `.env` **외의 파일에 적지 마세요.** 이전에 템플릿 파일(`.env.example`)에 실제 키를 적어 커밋 직전까지 간 사고가 있었고, 그래서 템플릿 파일 자체를 삭제했습니다. 키 파일은 `.env` 하나뿐입니다.
-- 키가 없거나 틀려도 프로그램은 죽지 않습니다. 명세 §13.3에 따라 2단계 AI 검증만 건너뛰고 `정상(AI 미검증)`으로 표시하며 취합은 정상 진행됩니다.
+- **키를 `.env` 외의 파일에 적지 마세요.** 이전에 템플릿 파일(`.env.example`)에 실제 키를 적어 커밋 직전까지 간 사고가 있었고, 그래서 템플릿 파일 자체를 삭제했습니다. 키 파일은 `.env` 하나뿐입니다.
+- Supabase 키는 `supabase projects api-keys --project-ref cfchnprkizcmfymlezyo`로 얻습니다. 단 **신형 `secret` 키는 CLI가 마스킹해서(`·` 문자로) 내려주므로** 대시보드에서 복사해 `SUPABASE_SECRET_KEY`에 넣거나, 위처럼 legacy `service_role` 키를 쓰세요. 마스킹된 값이 들어오면 503으로 즉시 잡습니다.
+- OpenAI 키가 없거나 틀려도 프로그램은 죽지 않습니다. 명세 §13.3에 따라 2단계 AI 검증만 건너뛰고 `정상(AI 미검증)`으로 표시하며 취합은 진행됩니다.
+- Supabase 키가 없으면 **인증이 열리는 게 아니라 503으로 닫힙니다**(fail-closed). 인증 없이 돌리려면 `AUTH_DISABLED=1`을 명시해야 하고, 기동 시 경고를 찍습니다.
 
 ---
 
 ## 1. 실행 방법
 
 ```bash
-pip install openpyxl openai fastapi uvicorn python-multipart
+pip install openpyxl pillow openai fastapi uvicorn python-multipart httpx pyjwt cryptography
 ```
 
 ### 웹 (권장)
@@ -36,7 +40,16 @@ pip install openpyxl openai fastapi uvicorn python-multipart
 python3 -m uvicorn server:app --port 8000
 ```
 
-브라우저에서 `http://localhost:8000/aggregate.html` — 업로드 → 검토·범위선택 → 합성모드 → 결과 4단계입니다. `http://localhost:8000/` 은 생성 홈이고 사이드바 '취합'으로 이동합니다.
+`http://localhost:8000/login.html` 로 시작합니다. 로그인하지 않고 다른 화면에 가면 여기로 돌려보냅니다.
+
+| 화면 | 경로 |
+|---|---|
+| 로그인·회원가입 | `/login.html` |
+| 엑셀 취합 (4단계) | `/aggregate.html` |
+| 작업 이력 | `/history.html` |
+| 관리자 콘솔 | `/admin.html` (관리자만) |
+
+`Supabase`를 띄우기 어려운 환경에서 취합만 보려면 `AUTH_DISABLED=1 python3 -m uvicorn server:app --port 8000` 으로 인증을 끕니다(로컬 개발 전용).
 
 ### CLI
 
@@ -69,7 +82,7 @@ python3 test_auth.py
 
 앞의 두 개는 8개·7개 시나리오가 전부 통과해야 정상이며 **네트워크·API 키 없이** 돌아갑니다(AI 계층은 스텁, 인증은 `AUTH_DISABLED=1`로 끔).
 
-`test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 10개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
+`test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 11개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
 
 ---
 
@@ -133,7 +146,7 @@ python3 test_auth.py
 | [ui/login.html](ui/login.html) | 로그인·회원가입 (design.md 화면 1). aggregate.html과 토큰·테마 셸 공유 |
 | [ui/history.html](ui/history.html) | 작업 이력 (design.md 화면 9). 검색·유형 필터·재다운로드 |
 | [ui/admin.html](ui/admin.html) | Admin 콘솔 (design.md 화면 10). 지표·계정·정책·사용 로그 |
-| [test_auth.py](test_auth.py) | 인증·영속화·이력·Admin 10개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다** |
+| [test_auth.py](test_auth.py) | 인증·영속화·이력·Admin 11개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다** |
 | [test_server.py](test_server.py) | API 7개 시나리오(end-to-end / 강제 포함 / 업로드 거부 / 키 컬럼 / 선택 입력 컬럼 / 부서명 / 잡 진행률) |
 
 `server.py`는 `aggregate.py`를 import만 하고 수정하지 않습니다. `main()`과 동일한 순서(`read_file` → `review_stage1` → 게이팅 → `review_stage2_many` → `preprocess` → `synthesize` → `write_report`)를 호출하므로 CLI와 웹이 같은 코드 경로를 탑니다.
@@ -237,32 +250,78 @@ python3 test_auth.py
 
 ---
 
-## 5. 이어받는 쪽에 권하는 순서
+## 5. 다음에 할 일
 
-1. `.env`에 키를 넣고 `python3 test_aggregate.py && python3 test_server.py && python3 test_auth.py`로 환경 확인
-2. **다른 종류의 업무 양식**으로도 한 번 돌려보세요. 지사별 자체점검 리스트 8개는 검증했지만(§4), 양식이 다르면 구조 인식이 또 깨질 수 있습니다 — 실제 파일에서 가장 깨지기 쉬운 부분입니다
-3. **업로드 화면에서 키 컬럼과 선택 입력 컬럼을 반드시 지정하세요.** 실제 서식에서 오탐이 나는 지점은 지금까지 이 둘뿐이었습니다
-   - 키 컬럼: 지정이 없으면 **첫 컬럼**이 키입니다([aggregate.py](aggregate.py) `_pick_key_column`). 첫 컬럼이 부서명처럼 행마다 반복되면 전 행이 키 충돌로 '이상' 처리됩니다
-   - 선택 입력 컬럼: 지정이 없으면 **전 컬럼이 필수**입니다. 비고·특이사항처럼 비워두는 칸이 있으면 그 파일 전체가 '이상'이 되어 취합에서 기본 제외됩니다
-   - CLI에서는 `--rules` JSON의 `"key": true` / `"required": false`로 지정합니다
-4. **2단계 AI 병렬화 실측** — 병렬 경로는 들어갔지만(§4 참조) 실제 키로 순차 대비 배수를 재보지 않았습니다. 업무 파일 여러 개로 한 번 재고, 느리면 `AI_CONCURRENCY`를 올려보세요(기본 6). 계정 rate limit에 걸리면 낮추면 됩니다
-5. **첫 관리자 지정** — 계정 관리는 이제 `/admin.html`에서 하지만, 첫 관리자는 화면에 들어갈 수 없으니 CLI로 올립니다.
+먼저 환경 확인:
 
-   ```bash
-   python3 manage_users.py promote admin01
-   ```
+```bash
+python3 test_aggregate.py && python3 test_server.py && python3 test_auth.py
+```
 
-   비밀번호는 이 도구가 다루지 않습니다 — 가입은 `/login.html`에서 본인이 합니다. 사번은 대소문자를 구분하지 않습니다
+8개·7개·11개 시나리오가 전부 통과해야 정상입니다. 앞의 둘은 네트워크 없이 돌고, `test_auth.py`는 실제 Supabase가 필요합니다.
 
-6. **RLS 정책은 지금 쓸 일이 아닙니다.** RLS는 켜져 있고 정책이 0개라 `anon`·`authenticated`는 전면 거부이며, 모든 접근이 백엔드(service key)를 경유합니다. 공개 키로 조회하면 전 테이블이 빈 배열임을 테스트가 지킵니다. 소유자 기반 정책을 쓰면 오히려 `authenticated`에게 읽기를 **열어주는** 셈이라, 프론트가 Supabase를 직접 호출하도록 구조를 바꿀 때 함께 쓰는 것이 맞습니다
-7. **Supabase** — 프로젝트는 정해졌습니다. 새 계정의 `chwihap-app`(ref `cfchnprkizcmfymlezyo`, ap-northeast-2 서울)이며 `supabase link` 완료 상태입니다
+### 큰 것 — PRD 우선순위 순
 
-   기존 `ksw1727@gmail.com's Project`는 쓰지 않습니다. 그 `public` 스키마에는 사고 보고 시스템이 19개 테이블로 돌아가고 있어 섞이면 안 됩니다. Preview branch는 병합하면 결국 같은 production DB로 들어가 격리 수단이 못 되고, 전용 스키마를 써도 `supabase_migrations` 이력을 공유해 두 저장소의 `db push`가 간섭합니다 — 별도 프로젝트만이 완전히 분리됩니다
+1. **hwpx 병합(F3)** — 미착수. PRD의 개발 리소스 우선순위 ②입니다(① 엑셀 취합은 완료). M1 말에 상용 SDK 전환 여부 PoC 판정이 걸려 있어(§10 잔여 리스크) 착수 전에 그 판단이 필요합니다
+2. **AI 양식 생성(F1)** — 미착수, 우선순위 ③. 화면 3만 정적으로 있고 AI 연동이 없습니다
+3. **기존 양식 인지(F6)** — 미착수, 우선순위 ④. F1 인프라를 확장 재사용하는 설계라 F1 뒤에 붙는 것이 맞습니다
 
-   **스키마는 이미 있습니다.** 저장소 밖(대시보드)에서 만들어진 것으로 보이며 명세의 테이블 10개(`aggregation_jobs`·`review_results`·`uploaded_files`·`form_templates`·`field_rules`·`group_mappings`·`projects`·`profiles`·`audit_logs`·`retention_policy`)와 버킷 `uploads`·`results`가 있습니다. 데이터는 전부 0건입니다
+### 작은 것 — 언제든 가능
 
-   **보안 결함을 하나 고쳤습니다** — 그 10개 테이블 전부 RLS가 꺼진 채 `anon`에 SELECT·INSERT·UPDATE·DELETE 권한이 있었습니다. anon 키는 프론트엔드에 실려 공개되는 값이라 키만 있으면 누구나 전 테이블을 읽고 지울 수 있는 상태였고, `supabase db advisors`도 10건 전부를 ERROR/EXTERNAL로 지적했습니다. [supabase/migrations/20260803065832_enable_rls.sql](supabase/migrations/20260803065832_enable_rls.sql)로 RLS를 켰고 재진단 ERROR 0건입니다. 정책은 인증(F4-1)이 들어와 접근 모델이 정해진 뒤에 씁니다
+4. **다른 종류의 업무 양식으로 구조 인식 확인.** 지사별 자체점검 리스트 8개는 검증했지만(§4), 양식이 다르면 또 깨질 수 있습니다. 실제 파일에서 가장 깨지기 쉬운 부분이고, 새 양식을 만나면 §4의 방식대로 원본 구조를 먼저 덤프해 엔진 판정과 대조하세요
+5. **2단계 AI 병렬화 실측.** 병렬 경로는 들어갔지만 실제 키로 순차 대비 배수를 재보지 않았습니다. 유료 호출이라 사용자 동의를 받고 진행하세요. 느리면 `AI_CONCURRENCY`를 올리고(기본 6) rate limit에 걸리면 낮춥니다
+6. **보관 기간 자동 삭제.** `retention_policy.retention_days`(기본 90) 값은 저장되고 Admin 화면에서 바꿀 수 있지만, 기간이 지난 자료를 실제로 지우는 배치가 없습니다
+7. **업로드 제한 화면 조정.** 파일당 50MB·30개·500MB가 `server.py` 상수입니다. Admin 화면에 값만 보여주고 바꾸는 기능은 없습니다
+8. **PRD v2.0 정리.** 이번 회차에 넣은 것 중 PRD에 안 올라간 요구사항이 있습니다 — **부서명 지정**(F2-13·F2-14 옆에 나란히 놓일 항목). §2 구현 완료 표를 PRD 요구사항으로 승격하세요
+9. **마이그레이션 baseline.** 원격 이력의 `0001`·`0002`는 SQL이 저장소에 없어 remote-only입니다. 저장소만으로 DB를 재구축할 수 없다는 뜻입니다. `supabase db pull`이 Docker를 요구하는데 이 머신에 Docker Desktop이 없습니다 — 설치 후 `supabase db pull baseline --linked` 한 번으로 해소됩니다
 
-8. **미해결 — 마이그레이션 baseline**. 원격 이력의 `0001`·`0002`는 SQL이 저장소에 없어 remote-only로 남아 있습니다. 저장소만으로 DB를 재구축할 수 없다는 뜻입니다. `supabase db pull`이 Docker를 요구하는데 이 머신에 Docker Desktop이 없습니다 — 설치 후 `supabase db pull baseline --linked`로 한 번 떠두면 해소됩니다
+---
 
-9. **CLI 로그인 주의** — `supabase login`이 기본 프로필의 토큰을 새 계정으로 덮었습니다. 기존 ksw1727 계정을 다시 쓰려면 재로그인이 필요합니다. 또 `~/.supabase/profile`이 설정 파일 없는 프로필명(`chwihap`)을 가리켜 `db query`가 `failed to read profile`로 죽길래 `profile.disabled`로 옮겨뒀습니다(되돌리려면 파일명만 복구)
+## 6. 알고 있어야 할 상태
+
+### 실제 파일로 쓸 때 반드시 지정할 것
+
+업로드 화면에서 세 가지를 지정하세요. 실제 서식에서 오탐·오작동이 나는 지점은 지금까지 이것들이었습니다.
+
+| 항목 | 미지정 시 |
+|---|---|
+| 키 컬럼 | 자동 판정(키워드 → 고유 컬럼 → 첫 컬럼). 대개 맞지만 업무상 키가 다르면 지정 |
+| 선택 입력 컬럼 | **전 컬럼 필수.** 비고처럼 비워두는 칸이 있으면 그 파일이 '이상'이 되어 취합에서 기본 제외 |
+| 부서명 | 파일명 전체가 결과의 `부서` 컬럼에 들어감. 추천 칩을 누르거나 직접 입력 |
+
+CLI에서는 `--rules` JSON의 `"key": true` / `"required": false`로 지정합니다(부서명은 파일명 기준).
+
+### Supabase
+
+`chwihap-app` (ref `cfchnprkizcmfymlezyo`, ap-northeast-2 서울), `supabase link` 완료. 계정은 GitHub 연동된 `ksw251020@gmail.com`입니다.
+
+**기존 `ksw1727@gmail.com's Project`는 쓰지 않습니다** — 그 `public`에는 사고 보고 시스템이 19개 테이블로 돌아갑니다. Preview branch는 병합하면 같은 production DB로 들어가 격리가 안 되고, 전용 스키마도 `supabase_migrations` 이력을 공유해 간섭합니다. 별도 프로젝트만이 완전히 분리됩니다.
+
+**RLS 정책은 지금 쓸 일이 아닙니다.** RLS는 켜져 있고 정책이 0개라 `anon`·`authenticated`는 전면 거부이며 모든 접근이 백엔드(service key)를 경유합니다. 공개 키로 조회하면 전 테이블이 빈 배열임을 `test_auth.py`가 지킵니다. 소유자 기반 정책을 쓰면 오히려 `authenticated`에게 읽기를 **열어주는** 셈이라, 프론트가 Supabase를 직접 호출하도록 구조를 바꿀 때 함께 써야 합니다.
+
+**CLI 주의** — `supabase login`이 기본 프로필 토큰을 새 계정으로 덮었습니다(기존 ksw1727 계정은 재로그인 필요). 또 `~/.supabase/profile`이 설정 파일 없는 프로필명(`chwihap`)을 가리켜 `db query`가 `failed to read profile`로 죽길래 `profile.disabled`로 옮겨뒀습니다 — 되돌리려면 파일명만 복구하면 됩니다.
+
+### 계정
+
+지금 계정은 `admin01`(관리자) 하나뿐입니다. 계정 관리는 `/admin.html`에서 하지만 **첫 관리자는 화면에 못 들어가므로** CLI로 올립니다.
+
+```bash
+python3 manage_users.py promote admin01
+```
+
+이 도구는 비밀번호를 다루지 않습니다 — 가입은 `/login.html`에서 본인이 합니다. 사번은 대소문자를 구분하지 않습니다.
+
+### 테스트 데이터 규칙
+
+`test_auth.py`는 실제 Supabase에 계정을 만들고 지웁니다. 사번 접두사는 `zz-test-`이며, teardown이 Storage 폴더와 감사 로그까지 정리합니다. **DB는 계정 1건·로그 0건·버킷 비어 있는 상태로 끝나야 정상입니다** — 남아 있으면 정리가 실패한 것이니 원인을 찾으세요(전에 `audit_logs` FK 때문에 삭제가 막혀 조용히 실패한 적이 있습니다).
+
+실제 업무 파일은 `sampledata/`에 있고 `.gitignore`로 커밋되지 않습니다.
+
+### 남은 경계
+
+| 항목 | 상태 |
+|---|---|
+| 작업 재개 | 재시작 후 기록·산출물은 남지만 중단된 취합을 그 자리에서 이어서 하지는 못함 |
+| 진행 중 잡 상태 | `aggregation_jobs`에 남기지만 폴링용 상태는 프로세스 메모리 |
+| hwpx 병합(F3) | 미착수 |
+| 이미지 AI Vision · 파일 간 교차 중복 | 명세 §14 v2 백로그 |
