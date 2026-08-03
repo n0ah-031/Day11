@@ -2,10 +2,10 @@
 
 | 항목 | 내용 |
 |---|---|
-| 작성일 | 2026-08-03 |
-| 브랜치 | `claude/day11-handoff-continuation-2021a1` (이전: `claude/docs-aggregation-program-31c2ae`) |
+| 작성일 | 2026-08-03 (갱신) |
+| 브랜치 | `claude/handoff-work-progress-f416b0` (이전: `claude/day11-handoff-continuation-2021a1`, `claude/docs-aggregation-program-31c2ae`) |
 | 기준 문서 | [docs/PRD_v1.8.md](docs/PRD_v1.8.md) (최신), [docs/취합기능_기술명세_v0.1.md](docs/취합기능_기술명세_v0.1.md), [docs/design.md](docs/design.md) |
-| 상태 | **웹에서 업로드→검토→취합→다운로드 전 구간 동작.** 브라우저 실측 확인 완료 |
+| 상태 | **웹에서 업로드→검토→취합→다운로드 전 구간 동작.** 브라우저 실측 확인 완료. 종전 미검증 2건(이미지 anchor·대량 성능) 해소 |
 
 ---
 
@@ -48,14 +48,16 @@ python3 aggregate.py <입력폴더> --mode B
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `--mode` | `A` | 합성 모드 `A`/`B`/`C`/`D` (§9) |
+| `--mode` | `B` | 합성 모드 `A`/`B`/`C`/`D` (§9) |
 | `--model` | `gpt-5-mini` | LLM 모델. `.env`의 `OPENAI_MODEL`로도 지정 가능 |
 | `--no-ai` | off | 2단계 AI 재검증 생략(규칙검증만) |
 | `--out` | `merged.xlsx` | 결과 파일 경로 |
 | `--report` | `error_report.xlsx` | 오류 리포트 경로 |
-| `--include-errors` | off | 오류 등급 파일까지 강제로 취합 포함(§7) |
-| `--rules` | 없음 | 작성기준 JSON 경로(§5.4 확장 스키마) |
-| `--mask-names` | off | 성명 컬럼도 마스킹(§13.2, 성명은 사용자 선택 사항) |
+| `--include-anomalous` | off | 오류 등급 파일까지 강제로 취합 포함(§7) |
+| `--rules` | 없음 | 작성기준 JSON 경로(§5.4 확장 스키마). 키 컬럼 `"key": true`, 선택 입력 컬럼 `"required": false` |
+| `--group-map` | 없음 | 모드 C 그룹 매핑 JSON `{시트명: 그룹명}` |
+| `--summary-cols` | 없음 | 모드 D 요약 지표 컬럼(콤마 구분) |
+| `--include-hidden` | off | 숨김 시트도 포함 |
 
 자체 점검:
 
@@ -64,7 +66,7 @@ python3 test_aggregate.py
 python3 test_server.py
 ```
 
-각각 5개·4개 시나리오가 전부 통과해야 정상입니다. 네트워크·API 키 없이 돌아갑니다(AI 계층은 스텁으로 대체).
+각각 6개·5개 시나리오가 전부 통과해야 정상입니다. 네트워크·API 키 없이 돌아갑니다(AI 계층은 스텁으로 대체).
 
 ---
 
@@ -90,6 +92,7 @@ python3 test_server.py
 | §13.2 마스킹 | 주민번호·전화·이메일 자동 치환. **전송 payload 전체**에 적용(인접 컬럼·분포 샘플 포함) |
 | §13.3 장애 폴백 | AI 서비스 장애 시 2단계 생략 → `정상(AI 미검증)` |
 | F2-13 키 컬럼 지정 | 업로드 단계에서 작업 단위 전역 키 컬럼 1개 선택(기본 `자동`). 작성기준 `{헤더명: {"key": true}}`로 전달 (PRD v1.8 신규) |
+| 선택 입력 컬럼 지정 | 업로드 단계에서 비워둬도 되는 컬럼을 다중 선택. 작성기준 `{헤더명: {"required": false}}`로 전달. 미지정 시 종전대로 전 컬럼 필수 (PRD 미반영 — v1.9 필요) |
 
 ### 미구현 (의도적 제외)
 
@@ -114,7 +117,7 @@ python3 test_server.py
 | [aggregate.py](aggregate.py) | 취합 엔진 + CLI. 아래 표 참조 |
 | [server.py](server.py) | FastAPI. 세션은 프로세스 메모리 `dict` + 임시 디렉터리라 **서버 재시작 시 소실**. `/api` 라우트 뒤에 `ui/`를 정적 마운트 |
 | [ui/aggregate.html](ui/aggregate.html) | 취합 4단계 단일 페이지. Tailwind CDN + 바닐라 JS, 빌드 없음. 토큰·셸은 `index.html`에서 그대로 이식 |
-| [test_server.py](test_server.py) | API 3개 시나리오(end-to-end / 강제 포함 / 업로드 거부) |
+| [test_server.py](test_server.py) | API 5개 시나리오(end-to-end / 강제 포함 / 업로드 거부 / 키 컬럼 / 선택 입력 컬럼) |
 
 `server.py`는 `aggregate.py`를 import만 하고 수정하지 않습니다. `main()`과 동일한 순서(`read_file` → `review_stage1` → 게이팅 → `review_stage2` → `preprocess` → `synthesize` → `write_report`)를 호출하므로 CLI와 웹이 같은 코드 경로를 탑니다.
 
@@ -123,13 +126,14 @@ python3 test_server.py
 | 영역 | 역할 |
 |---|---|
 | `load_env` | `.env` → 환경변수 (표준 라이브러리만, python-dotenv 미사용) |
-| `Issue` / `FileResult` | 판정 결과 데이터 구조. 명세 §11의 `ReviewResult`/`ErrorItem`에 대응 |
-| `detect_structure` | §2 구조 인식 (헤더·데이터 영역·이미지 anchor) |
-| `classify_column` | §3 유형 분류 |
-| `validate_*` | §5 유형별 1단계 규칙 |
-| `mask_pii` | §13.2 마스킹. **외부 전송 직전 공통 통과 지점** |
-| `ai_review_batch` | §4.2 2단계 배치 재검증 + §4.2.1 부분 실패 격리 |
-| `compose_*` | §9 합성 모드 A/B/C/D |
+| `Issue` / `Fix` / `SheetData` / `UploadedFile` | 판정 결과 데이터 구조. 명세 §11의 `ReviewResult`/`ErrorItem`에 대응 |
+| `read_file` · `_find_header` · `_read_images` | §2 구조 인식 (헤더·데이터 영역·이미지 anchor) |
+| `classify_columns` | §3 유형 분류 |
+| `review_stage1` · `_validate_text` · `_validate_number` · `_review_duplicates` · `_review_images` | §4.1·§5 유형별 1단계 규칙 |
+| `mask` | §13.2 마스킹. **외부 전송 직전 공통 통과 지점** |
+| `_ai_items` · `_ai_call` · `review_stage2` | §4.2 2단계 배치 재검증 + §4.2.1 부분 실패 격리 |
+| `preprocess` | §8 경고 항목 자동교정 + 원본값 보존 |
+| `synthesize` · `_add_summary_sheet` · `_shift_anchor` | §9 합성 모드 A/B/C/D + 이미지 anchor 재배치 |
 | `write_report` | §10 리포트 2시트 |
 | `main` | CLI 조립 |
 
@@ -139,21 +143,46 @@ python3 test_server.py
 
 ## 4. 검증 근거
 
-- `python3 test_aggregate.py` — 5개 시나리오 통과 (구조인식·전량스캔 / AI 폴백 / 마스킹 / 합성 4모드 / CLI end-to-end)
+- `python3 test_aggregate.py` — 6개 시나리오 통과 (구조인식·전량스캔 / AI 폴백 / 마스킹 / 합성 4모드 / 이미지 anchor 재배치 / CLI end-to-end)
 - 실제 OpenAI 호출 검증(`gpt-5-mini`): 1단계를 전부 통과하지만 내용이 문맥상 틀린 샘플로 확인
   - 무관한 서술(`"오늘 점심은 김치찌개가…"` in 사업내용) → 부적합 판정
   - 이상치 금액(980,000,000 vs 다른 행 수백만원) → 부적합 판정
   - 인접 컬럼 교차 검증: 사업내용↔예산액 불일치를 양방향으로 지적 → §4.2 인접 컨텍스트 동작 확인
   - 세 건 모두 경고 등급이라 취합은 차단되지 않음(2/2건 포함) → §6.2 오탐 방어 동작 확인
 
-- `python3 test_server.py` — 4개 시나리오 통과
+- `python3 test_server.py` — 5개 시나리오 통과
 - **브라우저 실측**(uvicorn + 실제 xlsx 3개, API 키 없이): 업로드 시 시트·헤더행·행수 인식 → 검토에서 정상 2 / 이상 1, 오류 파일만 기본 해제(선택 2/3건) → 모드 D 취합 → `종합요약` 시트가 `=SUMIF('예산'!A2:A4,$A2,'예산'!E2:E4)` 수식으로 생성됨(§9 하드코딩 금지 충족) → 결과·리포트 다운로드 200
 - 오류 파일까지 강제 체크(3/3건) → §10.1 **특이사항** 안내가 셀 위치까지 표시됨
 - 라이트/다크 양쪽 렌더 확인, 콘솔 에러 0건
 - **키 컬럼(F2-13)**: 첫 컬럼이 부서명처럼 반복되는 xlsx로 `자동` 검토 → '이상'(키 충돌 오탐), 같은 파일에 고유 키 컬럼 지정 → '정상'. 화면에서 전환 확인
 - **모드 C**: 4개 시트(1~4월)×2파일을 `1·2월→상반기 / 3월→하반기 / 4월 미매핑`으로 취합 → 상반기 9행·하반기 5행·미분류 5행, `구분` 컬럼에 원본 시트명 보존, 미매핑 안내 표시. API·UI 양쪽 확인
 
-**미검증**: 대량 파일(명세 기준 30개/10만 행) 성능, 이미지 포함 합성 시 anchor 재배치(§9).
+### 이번 회차에 해소한 미검증 항목
+
+**이미지 anchor 재배치(§9)** — 실측 결과 3건 모두 깨져 있어 수정했습니다([aggregate.py](aggregate.py) `_shift_anchor`).
+
+| 증상 | 원인 |
+|---|---|
+| 모드 A에서 사진이 2행 아래 엉뚱한 데이터 행에 붙음 | 출력은 헤더를 1행으로 당겨 쓰는데 anchor를 안 옮겼음(주석은 "이동 없음"이라 단정) |
+| 모드 B/C/D에서 증빙사진이 예산액 칸 위에 얹힘 | 앞에 끼워 넣는 `구분`·`부서`만큼 열이 밀리는데 열 오프셋 미적용 |
+| 셀에 맞춰 줄여 놓은 사진이 원본 픽셀 크기로 되살아남 | 표시 크기는 anchor의 `ext`에 있는데 openpyxl의 `im.width/height`는 원본 픽셀을 돌려줌 |
+
+두 셀 앵커는 `OneCellAnchor`로 뭉개지 않고 그대로 재구성합니다(점유 범위·셀내 EMU 오프셋·`editAs` 보존). 실측: 원본 `D4:F6` → 모드 A `D2:F4`, 모드 B `E2:G4`. `test_aggregate.py`에 시나리오 추가.
+
+**대량 파일 성능** — 30개 파일 / 총 99,990행 / 3.4MB, AI 계층 제외, M-series macOS 기준:
+
+| 단계 | 소요 |
+|---|---|
+| `read_file`(구조 인식) | 18.0s (50%) |
+| `save`(결과 쓰기) | 13.2s (36%) |
+| `synthesize`(모드 B) | 2.6s |
+| `preprocess` | 1.3s |
+| `review_stage1` | 1.2s |
+| **합계** | **36.3s** (최대 메모리 255MB, 오탐 0건) |
+
+86%가 openpyxl의 xlsx 파싱·직렬화라 미세 최적화 여지가 없습니다. **명세 규모에서 동기 실행은 36초**이고 여기에 2단계 AI 호출이 얹히면 더 늘어납니다. 화면에는 진행률이 없어 그동안 사용자는 멈춘 것처럼 느낍니다 — 비동기 잡(§6.1)을 넣을 판단 근거는 이 수치입니다.
+
+**미검증(남음)**: 실제 업무 서식에서의 헤더 인식 정확도(실제 파일 필요), 실제 OpenAI 키로 돌린 대량 배치의 2단계 소요 시간.
 
 ---
 
@@ -161,6 +190,10 @@ python3 test_server.py
 
 1. `.env`에 본인 키 넣고 `python3 test_aggregate.py && python3 test_server.py`로 환경 확인
 2. uvicorn 띄우고 **실제 업무 엑셀**로 한 번 돌려서 헤더 인식이 실제 서식에서 맞는지 확인 — 구조 인식은 실제 파일에서 가장 깨지기 쉬운 부분입니다
-3. 키 컬럼을 화면에서 지정하세요. 지정이 없으면 **첫 컬럼**이 키가 됩니다([aggregate.py:381](aggregate.py:381)). 첫 컬럼이 부서명처럼 행마다 반복되는 서식이면 전 행이 키 충돌로 '이상' 처리됩니다. CLI에서는 `--rules`의 `"key": true`로 지정합니다
-4. 이미지 포함 파일로 anchor 재배치 검증 (§9, 미검증 영역)
-5. 대량 파일 성능 확인 (30개/10만 행). 지금은 동기 실행이라 요청이 오래 걸리면 브라우저가 먼저 끊길 수 있습니다 — 여기서 막히면 그때 비동기 잡을 넣으세요
+3. **업로드 화면에서 키 컬럼과 선택 입력 컬럼을 반드시 지정하세요.** 실제 서식에서 오탐이 나는 지점은 지금까지 이 둘뿐이었습니다
+   - 키 컬럼: 지정이 없으면 **첫 컬럼**이 키입니다([aggregate.py](aggregate.py) `_pick_key_column`). 첫 컬럼이 부서명처럼 행마다 반복되면 전 행이 키 충돌로 '이상' 처리됩니다
+   - 선택 입력 컬럼: 지정이 없으면 **전 컬럼이 필수**입니다. 비고·특이사항처럼 비워두는 칸이 있으면 그 파일 전체가 '이상'이 되어 취합에서 기본 제외됩니다
+   - CLI에서는 `--rules` JSON의 `"key": true` / `"required": false`로 지정합니다
+4. 결정 대기 — **비동기 잡을 넣을지**. 명세 규모에서 동기 실행이 36초(§4 측정치)라 진행률 없이 버티는 시간이 깁니다. 시연 규모(파일 몇 개)라면 지금도 충분하니 서두를 필요는 없습니다
+5. 결정 대기 — **Supabase 도입 여부**(PRD §10 잔여 리스크). 인증이 없어 지금은 접근 제어가 없고, 세션이 프로세스 메모리라 서버를 재시작하면 작업이 통째로 날아갑니다. PRD는 외부 공개 전 인증 구현을 필수 선행 조건으로 잡고 있습니다. CLI는 로그인돼 있고(`supabase projects list`) 프로젝트 2개가 보이지만 어느 것도 link돼 있지 않으며, 이 저장소에는 Supabase 관련 코드·마이그레이션이 아직 없습니다
+6. PRD v1.9 반영 — 선택 입력 컬럼 지정이 요구사항으로 올라가 있지 않습니다(F2-13 옆에 나란히 놓일 항목)
