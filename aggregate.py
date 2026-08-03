@@ -137,6 +137,69 @@ class UploadedFile:
         return "이상" if self.issues else "정상"
 
 
+# 조직명에 흔히 붙는 꼬리 — 파일명에서 부서명 후보를 고를 때의 강한 신호
+ORG_SUFFIXES = ("지사", "사업소", "본부", "지역본부", "센터", "지점", "영업소",
+                "사업단", "부", "과", "팀", "실", "국", "청", "시", "군", "구")
+# 파일명에 섞이지만 부서명은 아닌 말들
+NOT_DEPT_WORDS = ("양식", "서식", "최종", "수정", "사본", "복사본", "제출", "제출용",
+                  "취합", "결과", "회신", "완료", "확인", "검토", "원본", "샘플",
+                  "final", "copy", "draft", "temp")
+
+
+def suggest_dept_names(stem: str, others: list[str] | None = None) -> list[str]:
+    """파일명에서 부서명 후보를 뽑는다. 앞쪽이 더 그럴듯한 순서.
+
+    부서명은 파일명에서 가져오는데(§9) 실제 회신 파일은 부서명 위치가 제각각이다.
+    `(수원사업소)2025년도…`, `…리스트(대구)`, `…리스트(양식)_판교지사`처럼 앞·뒤·
+    구분자 뒤에 흩어져 있어 한 가지 규칙으로는 못 잡는다. 그래서 규칙을 여럿 두고
+    후보를 제시하고, 최종 선택은 사용자에게 맡긴다.
+
+    others에 같이 올라온 다른 파일명을 주면 정확도가 크게 올라간다. 취합은 같은
+    양식을 배포해 회신받은 파일들이므로 **모든 파일에 공통으로 들어간 말은 제목이고
+    부서명은 파일마다 다른 부분**이다 — 이게 조직명 꼬리(지사·사업소)보다 강한
+    신호다. 예: '지열지점'은 지점으로 끝나지만 8개 파일 전부에 있으니 제목이다.
+    """
+    stem = (stem or "").strip()
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        value = (value or "").strip(" _-·.")
+        if not value or len(value) > 30:
+            return
+        if value.replace(" ", "").lower() in [w.lower() for w in NOT_DEPT_WORDS]:
+            return
+        if value not in candidates:
+            candidates.append(value)
+
+    # ① 괄호 안 — 실제 파일에서 가장 흔한 자리
+    for group in re.findall(r"[（(\[]([^）)\]]+)[）)\]]", stem):
+        add(group)
+    # ② 구분자로 끊은 조각 (뒤에서부터 — 파일명 꼬리에 붙는 경우가 많다)
+    without_groups = re.sub(r"[（(\[][^）)\]]*[）)\]]", " ", stem)
+    parts = [p for p in re.split(r"[_\-–—\s]+", without_groups) if p]
+    for part in reversed(parts):
+        add(part)
+
+    siblings = [s for s in (others or []) if s and s != stem]
+
+    def common(value: str) -> int:
+        """다른 파일명에도 들어 있으면 제목의 일부다(부서명은 파일마다 다르다)."""
+        if not siblings:
+            return 0
+        hits = sum(1 for s in siblings if value in s)
+        return 1 if hits >= max(1, len(siblings) // 2) else 0
+
+    # 공통어가 아닌 것 → 조직명 꼬리를 가진 것 → 짧은 것 순
+    def rank(value: str) -> tuple:
+        return (common(value), 0 if value.endswith(ORG_SUFFIXES) else 1, len(value))
+
+    candidates.sort(key=rank)
+    # 마지막 보루로 파일명 전체(종전 동작)를 남겨 둔다
+    if stem and stem not in candidates:
+        candidates.append(stem)
+    return candidates[:4]
+
+
 # ── 2. 업로드 및 구조 인식 (F2-1) ─────────────────────────────────────────────
 def _is_blank(value) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())

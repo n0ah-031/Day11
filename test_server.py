@@ -167,6 +167,42 @@ def test_optional_columns():
     print("  ✓ optional_cols 지정으로 선택 기재 칸 오탐 해소")
 
 
+def test_dept_names():
+    """부서명은 파일명에서 후보를 제시하고, 사용자가 정한 값이 결과에 쓰인다 (§9)."""
+    sid = new_session()
+    names = ["2025년 점검 리스트(대구).xlsx",
+             "2025년 점검 리스트(양식)_판교지사.xlsx"]
+    files = wait(upload(sid, [(n, book_bytes(CLEAN)) for n in names]))["files"]
+
+    # 같이 올라온 파일명의 공통어('점검', '리스트')는 제목이므로 뒤로 밀린다
+    assert files[0]["dept_candidates"][0] == "대구", files[0]["dept_candidates"]
+    assert files[1]["dept_candidates"][0] == "판교지사", files[1]["dept_candidates"]
+    # 기본값은 종전대로 파일명 전체 — 사용자가 고르기 전까지는 바뀌지 않는다
+    assert files[0]["dept"] == "2025년 점검 리스트(대구)", files[0]["dept"]
+
+    # 사용자가 정한 이름이 결과의 '부서' 컬럼에 들어간다
+    wait(client.post(f"/api/session/{sid}/review",
+                     json={"no_ai": True, "dept_names": {"0": "대구", "1": "판교지사"}}))
+    body = wait(client.post(f"/api/session/{sid}/aggregate",
+                            json={"mode": "B", "included": [0, 1]}))
+    assert body["metrics"]["aggregated"] == 2, body["metrics"]
+
+    res = client.get(f"/api/session/{sid}/download/result")
+    wb = openpyxl.load_workbook(io.BytesIO(res.content))
+    ws = wb["예산"]
+    depts = {ws.cell(row=r, column=1).value for r in range(2, ws.max_row + 1)}
+    assert depts == {"대구", "판교지사"}, depts
+
+    # 모드 A는 시트명에도 쓰인다
+    wait(client.post(f"/api/session/{sid}/review",
+                     json={"no_ai": True, "dept_names": {"0": "대구", "1": "판교지사"}}))
+    wait(client.post(f"/api/session/{sid}/aggregate", json={"mode": "A", "included": [0, 1]}))
+    wb = openpyxl.load_workbook(io.BytesIO(
+        client.get(f"/api/session/{sid}/download/result").content))
+    assert sorted(wb.sheetnames) == ["대구_예산", "판교지사_예산"], wb.sheetnames
+    print("  ✓ 부서명 후보 추천 + 사용자 지정이 결과에 반영")
+
+
 def test_job_progress():
     """긴 작업은 즉시 job_id를 돌려주고, 폴링으로 단계·진행률·오류가 전달돼야 한다."""
     sid = new_session()
@@ -204,7 +240,7 @@ def test_job_progress():
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
     for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
-               test_optional_columns, test_job_progress):
+               test_optional_columns, test_dept_names, test_job_progress):
         fn()
     print("\n전체 통과")
     return 0

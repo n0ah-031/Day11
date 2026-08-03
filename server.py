@@ -61,6 +61,19 @@ SESSIONS: dict[str, dict] = {}
 JOBS: dict[str, dict] = {}
 
 
+def _apply_dept_names(session: dict) -> None:
+    """사용자가 정한 부서명을 파일에 다시 씌운다.
+
+    재검토·취합 때 원본을 다시 읽으면 uf.dept가 파일명으로 돌아가므로,
+    파일을 만질 때마다 이걸 통과시킨다.
+    """
+    names = session.get("dept_names") or {}
+    for fid, uf in enumerate(session["files"]):
+        chosen = (names.get(str(fid)) or "").strip()
+        if chosen:
+            uf.dept = chosen
+
+
 def _session(sid: str, user: dict) -> dict:
     session = SESSIONS.get(sid)
     # 남의 세션은 존재 자체를 알리지 않는다 (§6.2 사용자별 데이터 격리)
@@ -237,10 +250,13 @@ def job_status(jid: str, user: dict = User) -> dict:
     return {k: v for k, v in job.items() if k != "owner"}
 
 
-def _file_view(fid: int, uf) -> dict:
+def _file_view(fid: int, uf, siblings: list[str] | None = None) -> dict:
     return {
         "fid": fid,
         "name": uf.name,
+        "dept": uf.dept,
+        # 파일명에서 뽑은 부서명 후보. 사용자가 고르거나 직접 입력한다(§9)
+        "dept_candidates": ag.suggest_dept_names(uf.path.stem, siblings),
         "readable": uf.readable,
         # §2.1 읽기 실패 사유는 read_file이 남긴 첫 이슈의 사유 그대로
         "reason": (uf.issues[0].reason if not uf.readable and uf.issues else None),
@@ -257,7 +273,7 @@ def create_session(user: dict = User) -> dict:
     sid = uuid.uuid4().hex
     session = SESSIONS[sid] = {"dir": Path(tempfile.mkdtemp(prefix="agg-")), "files": [],
                                "bytes": 0, "owner": user["id"], "project_id": None,
-                               "file_ids": {}}
+                               "file_ids": {}, "dept_names": {}}
     if store.enabled() and user["id"]:
         # 이름에 시각을 넣지 않는다 — 서버 시간대로 굳어버려 DB의 created_at(UTC)을
         # 보는 사람 시간대로 변환한 값과 어긋난다. 시각은 created_at만 쓴다.
@@ -300,8 +316,11 @@ async def upload_files(sid: str, files: list[UploadFile] = File(...), user: dict
                 row = store.put_upload(session["project_id"], session["owner"], path, path.name)
                 session["file_ids"][len(session["files"]) - 1] = row["id"]
         report("구조 인식 완료", len(pending), len(pending))
+        # 부서명 후보는 같이 올라온 파일명을 함께 봐야 정확해진다(공통어 = 제목)
+        stems = [f.path.stem for f in session["files"]]
+        _apply_dept_names(session)
         # fid는 세션 내 인덱스이므로 누적된 전체 목록을 돌려준다
-        return {"files": [_file_view(i, uf) for i, uf in enumerate(session["files"])]}
+        return {"files": [_file_view(i, uf, stems) for i, uf in enumerate(session["files"])]}
 
     return _start_job(work, user["id"])
 
@@ -317,9 +336,13 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
     # 비고·특이사항처럼 비워둘 수 있는 칸. 지정이 없으면 엔진 기본값(전 컬럼 필수)
     for col in (body or {}).get("optional_cols") or []:
         rules.setdefault(col, {})["required"] = False
+    # 부서명은 화면에서 고르거나 직접 입력한 값을 쓴다. 파일명은 기본값일 뿐이다
+    if isinstance((body or {}).get("dept_names"), dict):
+        session["dept_names"] = {str(k): v for k, v in body["dept_names"].items()}
 
     def work(report):
         total = len(session["files"])
+        _apply_dept_names(session)
         # 재검토 시 판정이 누적되지 않도록 초기화한다. 취합이 한 번이라도 돌았으면
         # preprocess가 셀 값을 고쳐놓았으므로 그때만 원본에서 다시 읽는다
         # (파일당 재파싱이 검토 시간의 절반을 차지한다).
@@ -388,6 +411,9 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
 @app.post("/api/session/{sid}/aggregate")
 def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
     session = _session(sid, user)
+    if isinstance(body.get("dept_names"), dict):
+        session["dept_names"] = {str(k): v for k, v in body["dept_names"].items()}
+    _apply_dept_names(session)
     files = session["files"]
     included = set(body.get("included") or [])
     # included는 사용자의 최종 선택이므로 등급으로 재필터링하지 않는다 (§7 강제 포함)

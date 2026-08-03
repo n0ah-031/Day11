@@ -386,6 +386,7 @@ AI 검증 없이 빠르게 검토
     files: [],          // 1단계 응답
     keyCol: '',         // 키 컬럼(빈 값이면 엔진 자동)
     optionalCols: new Set(),   // 비워둬도 되는 컬럼(빈 집합이면 엔진 기본값=전 컬럼 필수)
+    deptNames: {},      // fid → 부서명. 비우면 파일명을 쓴다
     review: null,       // 2단계 응답
     included: new Set(),
     mode: 'A',
@@ -534,13 +535,47 @@ AI 검증 없이 빠르게 검토
              <span class="material-symbols-outlined text-error text-lg shrink-0">block</span>
              <p class="text-body-sm font-body-sm text-on-surface">${esc(f.reason || '파일을 읽을 수 없습니다.')}</p>
            </div>`;
+      // 부서명: 파일명에서 뽑은 후보를 칩으로 제시하고, 안 맞으면 직접 입력한다.
+      // 결과의 '부서' 컬럼과 모드 A의 시트명이 이 값을 쓴다(§9)
+      const current = state.deptNames[f.fid] != null ? state.deptNames[f.fid] : (f.dept || '');
+      const chips = (f.dept_candidates || []).map((c) => {
+        const on = c === current;
+        return `<button data-dept-fid="${f.fid}" data-dept="${esc(c)}"
+          class="px-3 py-1.5 rounded-full border text-label-sm font-label-sm transition-all ${
+            on ? 'bg-primary text-on-primary border-primary'
+               : 'bg-surface text-on-surface-variant border-outline-variant hover:border-primary/40 hover:text-primary'
+          }">${esc(c.length > 20 ? c.slice(0, 20) + '…' : c)}</button>`;
+      }).join('');
+      const deptBox = f.readable
+        ? `<div class="mt-3 flex flex-col gap-2 rounded-lg bg-surface-container px-4 py-3">
+             <div class="flex flex-wrap items-center gap-2">
+               <span class="text-body-sm font-body-sm font-semibold text-on-surface">부서명</span>
+               <input data-dept-input="${f.fid}" value="${esc(current)}" placeholder="예: 대구지사"
+                 class="flex-1 min-w-40 rounded-lg bg-surface border border-outline-variant text-body-sm text-on-surface focus:border-primary focus:ring-primary/20 px-3 py-2">
+             </div>
+             ${chips ? `<div class="flex flex-wrap gap-2">${chips}</div>` : ''}
+           </div>`
+        : '';
       return `<div class="rounded-xl glass-card shadow-soft p-5">
         <div class="flex items-center gap-3">
           <span class="material-symbols-outlined ${f.readable ? 'text-primary' : 'text-error'}">description</span>
           <span class="text-body-md font-body-md font-semibold text-on-surface break-all">${esc(f.name)}</span>
-        </div>${body}
+        </div>${deptBox}${body}
       </div>`;
     }).join('');
+
+    $('file-list').querySelectorAll('[data-dept-fid]').forEach((b) => {
+      b.addEventListener('click', () => {
+        state.deptNames[b.dataset.deptFid] = b.dataset.dept;
+        renderFiles();
+      });
+    });
+    $('file-list').querySelectorAll('[data-dept-input]').forEach((input) => {
+      input.addEventListener('input', () => {
+        state.deptNames[input.dataset.deptInput] = input.value;
+      });
+    });
+
     $('btn-review').disabled = !state.files.some((f) => f.readable);
     renderKeyCol();
   }
@@ -580,7 +615,8 @@ AI 검증 없이 빠르게 검토
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ no_ai: $('no-ai').checked, key_col: state.keyCol || null,
-                               optional_cols: [...state.optionalCols] })
+                               optional_cols: [...state.optionalCols],
+                               dept_names: state.deptNames })
       }, '파일을 검토하는 중…');
       state.included = new Set(state.review.files.filter((f) => f.default_checked).map((f) => f.fid));
       renderReview();
@@ -717,7 +753,8 @@ AI 검증 없이 빠르게 검토
           mode: state.mode,
           included: [...state.included],
           group_map: state.mode === 'C' ? state.groupMap : {},
-          summary_cols: state.mode === 'D' ? [...state.summaryCols] : []
+          summary_cols: state.mode === 'D' ? [...state.summaryCols] : [],
+          dept_names: state.deptNames
         })
       }, '취합하는 중…');
       renderResult();
