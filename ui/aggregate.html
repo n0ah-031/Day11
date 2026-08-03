@@ -417,6 +417,20 @@ AI 검증 없이 빠르게 검토
     $('busy').classList.toggle('hidden', !on);
   }
 
+  // 긴 작업(업로드 파싱·검토·취합)은 job_id만 먼저 오고 진행 상황은 폴링으로 받는다.
+  // 명세 규모(30개/10만 행)에서 수십 초가 걸려 동기 응답으로는 멈춘 것처럼 보인다.
+  async function runJob(path, opts, fallbackText) {
+    const { job_id: jid } = await api(path, opts);
+    for (;;) {
+      const job = await api(`/api/job/${jid}`);
+      const pct = job.total ? ` (${job.done}/${job.total})` : '';
+      busy(true, (job.phase || fallbackText) + pct);
+      if (job.status === 'done') return job.result;
+      if (job.status === 'error') throw new Error(job.error);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
   // ── 스텝 인디케이터 ─────────────────────────────────────────
   const STEP_LABELS = ['업로드', '검토·범위선택', '합성모드', '결과'];
 
@@ -471,7 +485,8 @@ AI 검증 없이 빠르게 검토
       if (!state.sid) state.sid = (await api('/api/session', { method: 'POST' })).sid;
       const fd = new FormData();
       files.forEach((f) => fd.append('files', f));
-      const res = await api(`/api/session/${state.sid}/files`, { method: 'POST', body: fd });
+      const res = await runJob(`/api/session/${state.sid}/files`, { method: 'POST', body: fd },
+                               '파일을 읽는 중…');
       state.files = res.files;
       renderFiles();
     } catch (e) {
@@ -538,12 +553,12 @@ AI 검증 없이 빠르게 검토
     clearError();
     busy(true, '파일을 검토하는 중…');
     try {
-      state.review = await api(`/api/session/${state.sid}/review`, {
+      state.review = await runJob(`/api/session/${state.sid}/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ no_ai: $('no-ai').checked, key_col: state.keyCol || null,
                                optional_cols: [...state.optionalCols] })
-      });
+      }, '파일을 검토하는 중…');
       state.included = new Set(state.review.files.filter((f) => f.default_checked).map((f) => f.fid));
       renderReview();
       goto(2);
@@ -672,7 +687,7 @@ AI 검증 없이 빠르게 검토
     clearError();
     busy(true, '취합하는 중…');
     try {
-      state.result = await api(`/api/session/${state.sid}/aggregate`, {
+      state.result = await runJob(`/api/session/${state.sid}/aggregate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -681,7 +696,7 @@ AI 검증 없이 빠르게 검토
           group_map: state.mode === 'C' ? state.groupMap : {},
           summary_cols: state.mode === 'D' ? [...state.summaryCols] : []
         })
-      });
+      }, '취합하는 중…');
       renderResult();
       goto(4);
     } catch (e) {
