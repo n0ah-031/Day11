@@ -3,9 +3,9 @@
 | 항목 | 내용 |
 |---|---|
 | 작성일 | 2026-08-03 |
-| 브랜치 | `claude/docs-aggregation-program-31c2ae` |
+| 브랜치 | `claude/day11-handoff-continuation-2021a1` (이전: `claude/docs-aggregation-program-31c2ae`) |
 | 기준 문서 | [docs/취합기능_기술명세_v0.1.md](docs/취합기능_기술명세_v0.1.md), [docs/PRD_v1.7.md](docs/PRD_v1.7.md), [docs/design.md](docs/design.md) |
-| 상태 | 취합 엔진 동작 확인 완료(실제 OpenAI 호출 포함). UI는 엔진과 미연결 |
+| 상태 | **웹에서 업로드→검토→취합→다운로드 전 구간 동작.** 브라우저 실측 확인 완료 |
 
 ---
 
@@ -26,13 +26,19 @@ OPENAI_API_KEY=sk-...
 
 ## 1. 실행 방법
 
-의존성은 `openpyxl`, `openai` 두 개입니다.
-
 ```bash
-pip install openpyxl openai
+pip install openpyxl openai fastapi uvicorn python-multipart
 ```
 
-실행:
+### 웹 (권장)
+
+```bash
+python3 -m uvicorn server:app --port 8000
+```
+
+브라우저에서 `http://localhost:8000/aggregate.html` — 업로드 → 검토·범위선택 → 합성모드 → 결과 4단계입니다. `http://localhost:8000/` 은 생성 홈이고 사이드바 '취합'으로 이동합니다.
+
+### CLI
 
 ```bash
 python3 aggregate.py <입력폴더> --mode B
@@ -55,9 +61,10 @@ python3 aggregate.py <입력폴더> --mode B
 
 ```bash
 python3 test_aggregate.py
+python3 test_server.py
 ```
 
-5개 시나리오 전부 통과해야 정상입니다. 네트워크·API 키 없이 돌아갑니다(AI 계층은 스텁으로 대체).
+각각 5개·3개 시나리오가 전부 통과해야 정상입니다. 네트워크·API 키 없이 돌아갑니다(AI 계층은 스텁으로 대체).
 
 ---
 
@@ -85,12 +92,11 @@ python3 test_aggregate.py
 
 ### 미구현 (의도적 제외)
 
-명세는 React + FastAPI + Supabase 풀스택이지만, 지금은 **CLI 하나**입니다. 취합 코어 로직을 먼저 실제로 동작시키는 쪽을 택했습니다.
+명세는 React + FastAPI + Supabase 풀스택이지만, 지금은 **CLI + FastAPI + 정적 HTML**입니다. React 빌드 체인과 Supabase를 빼고 취합 코어를 먼저 실제로 동작시키는 쪽을 택했습니다.
 
 | 미구현 | 사유 / 다음 단계 |
 |---|---|
-| **UI ↔ 엔진 연결** | `ui/index.html`은 정적 페이지. 브라우저에서 업로드→취합→다운로드하려면 FastAPI 한 겹(약 50줄) 필요. **가장 우선순위 높은 잔여 작업** |
-| 인증(F4-1) | 사번↔가상이메일 매핑, Supabase Auth. CLI에는 불필요 |
+| 인증(F4-1) | 사번↔가상이메일 매핑, Supabase Auth. **현재 로그인 없이 누구나 접근 가능** |
 | DB/Storage | 결과를 로컬 파일로 씀. `review_results` 등 테이블 없음 |
 | 비동기 잡 | 동기 실행. `aggregation_jobs` 폴링 없음 |
 | 이력(F4-2)·Admin(F4-3) | 미착수 |
@@ -100,7 +106,18 @@ python3 test_aggregate.py
 
 ---
 
-## 3. 코드 구조 ([aggregate.py](aggregate.py), 단일 파일)
+## 3. 코드 구조
+
+| 파일 | 역할 |
+|---|---|
+| [aggregate.py](aggregate.py) | 취합 엔진 + CLI. 아래 표 참조 |
+| [server.py](server.py) | FastAPI. 세션은 프로세스 메모리 `dict` + 임시 디렉터리라 **서버 재시작 시 소실**. `/api` 라우트 뒤에 `ui/`를 정적 마운트 |
+| [ui/aggregate.html](ui/aggregate.html) | 취합 4단계 단일 페이지. Tailwind CDN + 바닐라 JS, 빌드 없음. 토큰·셸은 `index.html`에서 그대로 이식 |
+| [test_server.py](test_server.py) | API 3개 시나리오(end-to-end / 강제 포함 / 업로드 거부) |
+
+`server.py`는 `aggregate.py`를 import만 하고 수정하지 않습니다. `main()`과 동일한 순서(`read_file` → `review_stage1` → 게이팅 → `review_stage2` → `preprocess` → `synthesize` → `write_report`)를 호출하므로 CLI와 웹이 같은 코드 경로를 탑니다.
+
+### aggregate.py 내부
 
 | 영역 | 역할 |
 |---|---|
@@ -115,7 +132,7 @@ python3 test_aggregate.py
 | `write_report` | §10 리포트 2시트 |
 | `main` | CLI 조립 |
 
-단일 파일인 이유: 취합 흐름이 선형이라 모듈 분리 이득이 없었습니다. FastAPI를 붙이는 시점에 `main`만 얇게 재사용하면 되고, 그때 파일 분리를 검토하는 게 자연스럽습니다.
+단일 파일인 이유: 취합 흐름이 선형이라 모듈 분리 이득이 없었습니다.
 
 ---
 
@@ -128,13 +145,18 @@ python3 test_aggregate.py
   - 인접 컬럼 교차 검증: 사업내용↔예산액 불일치를 양방향으로 지적 → §4.2 인접 컨텍스트 동작 확인
   - 세 건 모두 경고 등급이라 취합은 차단되지 않음(2/2건 포함) → §6.2 오탐 방어 동작 확인
 
-**미검증**: 대량 파일(명세 기준 30개/10만 행) 성능, 이미지 포함 합성 시 anchor 재배치(§9), 모드 C 그룹 매핑 UI.
+- `python3 test_server.py` — 3개 시나리오 통과
+- **브라우저 실측**(uvicorn + 실제 xlsx 3개, API 키 없이): 업로드 시 시트·헤더행·행수 인식 → 검토에서 정상 2 / 이상 1, 오류 파일만 기본 해제(선택 2/3건) → 모드 D 취합 → `종합요약` 시트가 `=SUMIF('예산'!A2:A4,$A2,'예산'!E2:E4)` 수식으로 생성됨(§9 하드코딩 금지 충족) → 결과·리포트 다운로드 200
+- 오류 파일까지 강제 체크(3/3건) → §10.1 **특이사항** 안내가 셀 위치까지 표시됨
+- 라이트/다크 양쪽 렌더 확인, 콘솔 에러 0건
+
+**미검증**: 대량 파일(명세 기준 30개/10만 행) 성능, 이미지 포함 합성 시 anchor 재배치(§9), 모드 C 그룹 매핑을 실제 다중 시트 파일로 돌린 경우.
 
 ---
 
 ## 5. 이어받는 쪽에 권하는 순서
 
-1. `.env`에 본인 키 넣고 `python3 test_aggregate.py`로 환경 확인
-2. 실제 업무 엑셀로 `--mode B` 한 번 돌려서 헤더 인식이 실제 서식에서 맞는지 확인 — 구조 인식은 실제 파일에서 가장 깨지기 쉬운 부분입니다
-3. FastAPI 한 겹으로 `ui/index.html` 연결 (잔여 작업 1순위)
+1. `.env`에 본인 키 넣고 `python3 test_aggregate.py && python3 test_server.py`로 환경 확인
+2. uvicorn 띄우고 **실제 업무 엑셀**로 한 번 돌려서 헤더 인식이 실제 서식에서 맞는지 확인 — 구조 인식은 실제 파일에서 가장 깨지기 쉬운 부분입니다
+3. 키 컬럼 확인: 지정이 없으면 **첫 컬럼**이 키가 됩니다([aggregate.py:381](aggregate.py:381)). 첫 컬럼이 부서명처럼 행마다 반복되는 서식이면 전 행이 키 충돌로 '이상' 처리되니, `--rules`의 `"key": true`로 실제 키 컬럼을 지정하세요. 이 지정을 화면에서 하게 만드는 것이 다음 UI 작업 1순위입니다
 4. 이미지 포함 파일로 anchor 재배치 검증 (§9, 미검증 영역)
