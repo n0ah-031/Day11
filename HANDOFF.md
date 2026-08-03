@@ -205,14 +205,14 @@ python3 test_server.py
    - 선택 입력 컬럼: 지정이 없으면 **전 컬럼이 필수**입니다. 비고·특이사항처럼 비워두는 칸이 있으면 그 파일 전체가 '이상'이 되어 취합에서 기본 제외됩니다
    - CLI에서는 `--rules` JSON의 `"key": true` / `"required": false`로 지정합니다
 4. **2단계 AI 호출 병렬화** — 지금 성능의 유일한 병목입니다. 파일당 약 16초이고 `review_stage2`가 파일 단위로 순차 호출합니다. §4.2 게이팅이 파일 단위라 파일 간 호출은 서로 독립적이므로 병렬화해도 판정이 달라지지 않습니다
-5. 결정 대기 — **Supabase 도입 여부**(PRD §10 잔여 리스크). 인증이 없어 지금은 접근 제어가 없고, 세션·잡 상태가 프로세스 메모리라 서버를 재시작하면 작업이 통째로 날아갑니다. PRD는 외부 공개 전 인증 구현을 필수 선행 조건으로 잡고 있습니다
+5. **Supabase** — 프로젝트는 정해졌습니다. 새 계정의 `chwihap-app`(ref `cfchnprkizcmfymlezyo`, ap-northeast-2 서울)이며 `supabase link` 완료 상태입니다
 
-   **조사 결과(v1.9 회차)** — CLI는 로그인돼 있고 프로젝트 2개가 보입니다. 다만 `ksw1727@gmail.com's Project`(`pbultktpymulrbuaugnw`, ap-southeast-1)의 `public` 스키마에는 **이미 다른 앱이 19개 테이블로 돌아가고 있습니다**(`accidents`, `industrial_accident_details`, `app_users`, `audit_logs`, `role_permissions` 등 사고 보고 시스템). 마이그레이션 이력도 4건 쌓여 있습니다.
+   기존 `ksw1727@gmail.com's Project`는 쓰지 않습니다. 그 `public` 스키마에는 사고 보고 시스템이 19개 테이블로 돌아가고 있어 섞이면 안 됩니다. Preview branch는 병합하면 결국 같은 production DB로 들어가 격리 수단이 못 되고, 전용 스키마를 써도 `supabase_migrations` 이력을 공유해 두 저장소의 `db push`가 간섭합니다 — 별도 프로젝트만이 완전히 분리됩니다
 
-   | 격리 방법 | 판정 |
-   |---|---|
-   | Preview branch | 브랜칭은 켜져 있으나 **격리 수단이 아님**. 임시 개발 사본이고 병합하면 결국 같은 production `public`으로 들어갑니다 |
-   | 전용 스키마 | 테이블은 안 섞이지만 `supabase_migrations.schema_migrations`를 공유해 두 저장소의 `db push`가 서로의 이력을 봅니다 |
-   | **별도 프로젝트** | 유일하게 완전히 분리됩니다 |
+   **스키마는 이미 있습니다.** 저장소 밖(대시보드)에서 만들어진 것으로 보이며 명세의 테이블 10개(`aggregation_jobs`·`review_results`·`uploaded_files`·`form_templates`·`field_rules`·`group_mappings`·`projects`·`profiles`·`audit_logs`·`retention_policy`)와 버킷 `uploads`·`results`가 있습니다. 데이터는 전부 0건입니다
 
-   따라서 **별도 프로젝트 생성이 필요**합니다. 프로젝트 생성에는 DB 비밀번호 지정이 따르므로 사용자가 직접 만들고 ref만 넘겨주는 편이 안전합니다. 조사 중 임시로 걸었던 링크는 `supabase unlink`로 해제해 두었습니다(사고 보고 앱 DB로 실수로 push되는 것을 막기 위해)
+   **보안 결함을 하나 고쳤습니다** — 그 10개 테이블 전부 RLS가 꺼진 채 `anon`에 SELECT·INSERT·UPDATE·DELETE 권한이 있었습니다. anon 키는 프론트엔드에 실려 공개되는 값이라 키만 있으면 누구나 전 테이블을 읽고 지울 수 있는 상태였고, `supabase db advisors`도 10건 전부를 ERROR/EXTERNAL로 지적했습니다. [supabase/migrations/20260803065832_enable_rls.sql](supabase/migrations/20260803065832_enable_rls.sql)로 RLS를 켰고 재진단 ERROR 0건입니다. 정책은 인증(F4-1)이 들어와 접근 모델이 정해진 뒤에 씁니다
+
+6. **미해결 — 마이그레이션 baseline**. 원격 이력의 `0001`·`0002`는 SQL이 저장소에 없어 remote-only로 남아 있습니다. 저장소만으로 DB를 재구축할 수 없다는 뜻입니다. `supabase db pull`이 Docker를 요구하는데 이 머신에 Docker Desktop이 없습니다 — 설치 후 `supabase db pull baseline --linked`로 한 번 떠두면 해소됩니다
+
+7. **CLI 로그인 주의** — `supabase login`이 기본 프로필의 토큰을 새 계정으로 덮었습니다. 기존 ksw1727 계정을 다시 쓰려면 재로그인이 필요합니다. 또 `~/.supabase/profile`이 설정 파일 없는 프로필명(`chwihap`)을 가리켜 `db query`가 `failed to read profile`로 죽길래 `profile.disabled`로 옮겨뒀습니다(되돌리려면 파일명만 복구)
