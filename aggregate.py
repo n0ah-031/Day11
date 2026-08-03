@@ -17,6 +17,8 @@ import json
 import os
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -570,38 +572,17 @@ def _ai_call(client, model: str, items: list[dict]) -> dict[str, dict]:
     return {str(r.get("id")): r for r in parsed.get("results", []) if r.get("id")}
 
 
-def review_stage2(uf: UploadedFile, model: str, batch_size: int = 100) -> None:
-    """파일 전체가 1단계를 통과한 경우에만 호출된다(파일 단위 게이팅, §4.2)."""
-    items = _ai_items(uf)
-    if not items:
-        return
+def _ai_client():
+    """OpenAI 클라이언트. 만들 수 없으면 None (§13.3 서비스 전체 이용 불가)."""
     try:
         from openai import OpenAI
-        client = OpenAI()
-    except Exception as exc:                       # §13.3 서비스 전체 이용 불가 → 폴백
-        uf.ai_unverified = True
+        return OpenAI()
+    except Exception as exc:
         print(f"  · AI 재검증 생략(서비스 이용 불가: {exc}) → 정상(AI 미검증)", file=sys.stderr)
-        return
+        return None
 
-    verdicts: dict[str, dict] = {}
-    for start in range(0, len(items), batch_size):
-        batch = items[start:start + batch_size]
-        try:
-            verdicts.update(_ai_call(client, model, batch))
-        except Exception as exc:                   # §13.3 서비스 전체 장애·타임아웃 → 2단계 생략
-            uf.ai_unverified = True
-            print(f"  · AI 재검증 생략(서비스 장애: {exc}) → 정상(AI 미검증)", file=sys.stderr)
-            return
 
-    missing = [it for it in items if it["id"] not in verdicts]
-    if missing:
-        # ponytail: 실패 항목만 1회 재시도(개별 호출 대신 한 번에 묶어서). 개별 호출이 필요할 만큼
-        # 정확도 문제가 드러나면 항목별 루프로 전환.
-        try:
-            verdicts.update(_ai_call(client, model, missing))
-        except Exception:
-            pass
-
+def _apply_verdicts(uf: UploadedFile, items: list[dict], verdicts: dict[str, dict]) -> None:
     for it in items:
         result = verdicts.get(it["id"])
         if not result or result.get("verdict") not in ("적합", "부적합"):
@@ -615,6 +596,83 @@ def review_stage2(uf: UploadedFile, model: str, batch_size: int = 100) -> None:
             # §6.2 LLM 판단은 확정적이지 않으므로 경고 등급. 자동교정 대상에서 제외(§8)
             uf.issues.append(Issue(uf.name, it["sheet"], it["cell"], "정합성", "2단계", WARN,
                                    f"AI 재검증 부적합: {result.get('reason', '(사유 없음)')}", it["작성기준"]))
+
+
+def review_stage2_many(files: list[UploadedFile], model: str, batch_size: int = 100,
+                       workers: int | None = None, on_done=None) -> None:
+    """여러 파일의 2단계를 한 번에 병렬로 돌린다.
+
+    §4.2 게이팅이 파일 단위이므로 파일 간 호출은 서로의 판정에 영향을 주지 않고,
+    한 파일 안의 배치도 독립적이다. 그래서 (파일, 배치)를 하나의 평평한 작업 목록으로
+    만들어 단일 동시성 상한으로 돌린다 — 파일별로 풀을 중첩하면 동시 호출 수를
+    통제할 수 없다.
+
+    실패 격리는 파일 단위로 유지한다(§13.3). 어느 배치가 터지면 그 파일만
+    `정상(AI 미검증)`이 되고 다른 파일의 판정은 그대로 살아 있다.
+
+    on_done(uf)는 파일 하나의 판정이 끝날 때마다 호출된다(진행률 표시용).
+    """
+    targets = [uf for uf in files if uf.readable and not uf.issues]
+    if not targets:
+        return
+    client = _ai_client()
+    if client is None:
+        for uf in targets:
+            uf.ai_unverified = True
+        return
+
+    items_of = {id(uf): _ai_items(uf) for uf in targets}
+    jobs = [(uf, items_of[id(uf)][s:s + batch_size])
+            for uf in targets
+            for s in range(0, len(items_of[id(uf)]), batch_size)]
+    if not jobs:
+        return
+
+    if workers is None:
+        workers = int(os.environ.get("AI_CONCURRENCY", "6"))
+    workers = max(1, min(workers, len(jobs)))
+
+    verdicts: dict[int, dict[str, dict]] = {id(uf): {} for uf in targets}
+    failed: set[int] = set()
+    lock = threading.Lock()
+
+    def run(job) -> None:
+        uf, batch = job
+        try:
+            got = _ai_call(client, model, batch)
+        except Exception as exc:                   # §13.3 서비스 장애·타임아웃
+            with lock:
+                if id(uf) not in failed:
+                    failed.add(id(uf))
+                    print(f"  · {uf.name}: AI 재검증 생략(서비스 장애: {exc}) → 정상(AI 미검증)",
+                          file=sys.stderr)
+            return
+        with lock:
+            verdicts[id(uf)].update(got)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(run, jobs))
+
+    for uf in targets:
+        items = items_of[id(uf)]
+        if id(uf) in failed:
+            uf.ai_unverified = True
+        elif items:
+            missing = [it for it in items if it["id"] not in verdicts[id(uf)]]
+            if missing:
+                # ponytail: 실패 항목만 1회 재시도(개별 호출 대신 한 번에 묶어서).
+                try:
+                    verdicts[id(uf)].update(_ai_call(client, model, missing))
+                except Exception:
+                    pass
+            _apply_verdicts(uf, items, verdicts[id(uf)])
+        if on_done:
+            on_done(uf)
+
+
+def review_stage2(uf: UploadedFile, model: str, batch_size: int = 100) -> None:
+    """파일 하나의 2단계. 파일 전체가 1단계를 통과한 경우에만 호출된다(§4.2)."""
+    review_stage2_many([uf], model, batch_size=batch_size)
 
 
 # ── 8. 전처리 ────────────────────────────────────────────────────────────────
@@ -867,12 +925,19 @@ def main(argv=None) -> int:
         uf = read_file(path, args.include_hidden)
         if uf.readable:
             review_stage1(uf, rules)
-            # 파일 단위 게이팅: 1단계 위반이 하나라도 있으면 2단계로 진입하지 않는다 (§4.2)
-            if not uf.issues and not args.no_ai:
-                review_stage2(uf, args.model)
-            elif uf.issues:
+            if uf.issues:
+                # 파일 단위 게이팅: 1단계 위반이 하나라도 있으면 2단계로 진입하지 않는다 (§4.2)
                 print("  · 1단계 위반 발견 → 2단계 AI 재검증 미진입(API 호출 절약)")
         files.append(uf)
+
+    if not args.no_ai:
+        # 2단계는 파일마다 API 호출이라 순차로 돌리면 파일 수에 비례해 늘어난다.
+        # 파일 간 호출은 서로 독립적이므로 병렬로 묶는다.
+        pending = [uf for uf in files if uf.readable and not uf.issues]
+        if pending:
+            print(f"· 2단계 AI 재검증 {len(pending)}건 (동시 호출 "
+                  f"{os.environ.get('AI_CONCURRENCY', '6')}개)")
+            review_stage2_many(files, args.model)
 
     print_review(files)
 

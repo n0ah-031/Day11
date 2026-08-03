@@ -67,7 +67,7 @@ python3 test_server.py
 python3 test_auth.py
 ```
 
-앞의 두 개는 6개·6개 시나리오가 전부 통과해야 정상이며 **네트워크·API 키 없이** 돌아갑니다(AI 계층은 스텁, 인증은 `AUTH_DISABLED=1`로 끔).
+앞의 두 개는 7개·6개 시나리오가 전부 통과해야 정상이며 **네트워크·API 키 없이** 돌아갑니다(AI 계층은 스텁, 인증은 `AUTH_DISABLED=1`로 끔).
 
 `test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 9개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
 
@@ -107,10 +107,8 @@ python3 test_auth.py
 
 | 미구현 | 사유 / 다음 단계 |
 |---|---|
-
 | 작업 재개 | 재시작 후 **기록과 산출물은 남지만** 중단된 취합을 그 자리에서 이어서 하지는 못한다. 파싱된 작업 집합이 메모리에 있어 되살리려면 파일을 다시 내려받아 다시 읽어야 한다 |
 | 진행 중 잡 상태 | `aggregation_jobs`에 남기지만 폴링용 상태는 프로세스 메모리라, 재시작하면 진행률 추적이 끊긴다(기록은 남음) |
-
 | Admin 콘솔(F4-3) | 화면 미착수. 권한·정지는 `manage_users.py`로 임시 처리 |
 | hwpx 병합(F3) | 미착수. 명세상 별도 기능 |
 | 이미지 AI Vision | 명세 §14에서 v2 백로그로 지정된 항목 |
@@ -133,7 +131,7 @@ python3 test_auth.py
 | [test_auth.py](test_auth.py) | 인증·영속화·이력 9개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다** |
 | [test_server.py](test_server.py) | API 6개 시나리오(end-to-end / 강제 포함 / 업로드 거부 / 키 컬럼 / 선택 입력 컬럼 / 잡 진행률) |
 
-`server.py`는 `aggregate.py`를 import만 하고 수정하지 않습니다. `main()`과 동일한 순서(`read_file` → `review_stage1` → 게이팅 → `review_stage2` → `preprocess` → `synthesize` → `write_report`)를 호출하므로 CLI와 웹이 같은 코드 경로를 탑니다.
+`server.py`는 `aggregate.py`를 import만 하고 수정하지 않습니다. `main()`과 동일한 순서(`read_file` → `review_stage1` → 게이팅 → `review_stage2_many` → `preprocess` → `synthesize` → `write_report`)를 호출하므로 CLI와 웹이 같은 코드 경로를 탑니다.
 
 ### aggregate.py 내부
 
@@ -145,7 +143,7 @@ python3 test_auth.py
 | `classify_columns` | §3 유형 분류 |
 | `review_stage1` · `_validate_text` · `_validate_number` · `_review_duplicates` · `_review_images` | §4.1·§5 유형별 1단계 규칙 |
 | `mask` | §13.2 마스킹. **외부 전송 직전 공통 통과 지점** |
-| `_ai_items` · `_ai_call` · `review_stage2` | §4.2 2단계 배치 재검증 + §4.2.1 부분 실패 격리 |
+| `_ai_items` · `_ai_call` · `review_stage2_many` · `review_stage2` | §4.2 2단계 배치 재검증 + §4.2.1 부분 실패 격리. `_many`가 (파일, 배치)를 평평한 목록으로 만들어 단일 동시성 상한으로 병렬 호출한다 |
 | `preprocess` | §8 경고 항목 자동교정 + 원본값 보존 |
 | `synthesize` · `_add_summary_sheet` · `_shift_anchor` | §9 합성 모드 A/B/C/D + 이미지 anchor 재배치 |
 | `write_report` | §10 리포트 2시트 |
@@ -157,7 +155,7 @@ python3 test_auth.py
 
 ## 4. 검증 근거
 
-- `python3 test_aggregate.py` — 6개 시나리오 통과 (구조인식·전량스캔 / AI 폴백 / 마스킹 / 합성 4모드 / 이미지 anchor 재배치 / CLI end-to-end)
+- `python3 test_aggregate.py` — 7개 시나리오 통과 (구조인식·전량스캔 / AI 폴백 / 마스킹 / 합성 4모드 / 이미지 anchor 재배치 / 2단계 병렬·실패격리 / CLI end-to-end)
 - 실제 OpenAI 호출 검증(`gpt-5-mini`): 1단계를 전부 통과하지만 내용이 문맥상 틀린 샘플로 확인
   - 무관한 서술(`"오늘 점심은 김치찌개가…"` in 사업내용) → 부적합 판정
   - 이상치 금액(980,000,000 vs 다른 행 수백만원) → 부적합 판정
@@ -201,9 +199,13 @@ python3 test_auth.py
 
 > **측정 주의** — 이 표의 초기값(합계 36.3초)은 `tracemalloc`을 켠 채 잰 값이라 5배 넘게 부풀려져 있었습니다. 파이썬에서 openpyxl 같은 할당 집약적 코드를 잴 때 `tracemalloc`은 측정 자체를 크게 왜곡합니다. 메모리는 `resource.getrusage`의 RSS로 따로 재세요.
 
-**2단계 AI가 실제 지배적 비용** — 실제 키(`gpt-5-mini`)로 4행짜리 파일 1개를 재검증하는 데 **16.0초**가 걸렸습니다. `review_stage2`는 파일마다 순차 호출하므로 30개면 수 분 단위가 됩니다. 1단계 규칙검증 전체(0.16초)의 100배입니다.
+**2단계 AI가 실제 지배적 비용** — 실제 키(`gpt-5-mini`)로 4행짜리 파일 1개를 재검증하는 데 **16.0초**가 걸렸습니다. 1단계 규칙검증 전체(0.16초)의 100배입니다. 즉 **진행률 표시가 필요한 이유는 엑셀 처리(7초)가 아니라 AI 재검증**입니다.
 
-즉 **비동기 잡·진행률이 필요한 이유는 엑셀 처리(7초)가 아니라 AI 재검증**입니다. 다음 개선은 여기입니다 — 파일 단위 순차 호출을 병렬화하거나(§4.2 게이팅은 파일 단위라 서로 독립적), 배치를 키우는 쪽입니다.
+그래서 병렬화했습니다([aggregate.py](aggregate.py) `review_stage2_many`). (파일, 배치)를 하나의 평평한 작업 목록으로 만들어 **단일 동시성 상한**으로 돌립니다 — 파일별로 스레드 풀을 중첩하면 동시 호출 수를 통제할 수 없습니다. 동시 호출 수는 `AI_CONCURRENCY`(기본 6)로 조절합니다.
+
+실패 격리는 파일 단위로 유지합니다(§13.3) — 어느 배치가 터지면 그 파일만 `정상(AI 미검증)`이 되고 다른 파일 판정은 살아 있습니다.
+
+**미측정**: 실제 키로 돌린 순차 대비 병렬 배수. 회귀 테스트는 `_ai_call`을 지연·실패 스텁으로 바꿔 호출 스케줄만 결정적으로 검증합니다(네트워크·비용 없음). 실제 배수는 업무 파일로 한 번 재보는 편이 정확합니다 — 모델 응답 시간과 계정 rate limit에 달려 있습니다.
 
 **미검증(남음)**: 실제 업무 서식에서의 헤더 인식 정확도(실제 파일 필요), 30개 규모의 2단계 전체 소요(1개 16초 기준 추정치만 있음).
 
@@ -217,7 +219,7 @@ python3 test_auth.py
    - 키 컬럼: 지정이 없으면 **첫 컬럼**이 키입니다([aggregate.py](aggregate.py) `_pick_key_column`). 첫 컬럼이 부서명처럼 행마다 반복되면 전 행이 키 충돌로 '이상' 처리됩니다
    - 선택 입력 컬럼: 지정이 없으면 **전 컬럼이 필수**입니다. 비고·특이사항처럼 비워두는 칸이 있으면 그 파일 전체가 '이상'이 되어 취합에서 기본 제외됩니다
    - CLI에서는 `--rules` JSON의 `"key": true` / `"required": false`로 지정합니다
-4. **2단계 AI 호출 병렬화** — 지금 성능의 유일한 병목입니다. 파일당 약 16초이고 `review_stage2`가 파일 단위로 순차 호출합니다. §4.2 게이팅이 파일 단위라 파일 간 호출은 서로 독립적이므로 병렬화해도 판정이 달라지지 않습니다
+4. **2단계 AI 병렬화 실측** — 병렬 경로는 들어갔지만(§4 참조) 실제 키로 순차 대비 배수를 재보지 않았습니다. 업무 파일 여러 개로 한 번 재고, 느리면 `AI_CONCURRENCY`를 올려보세요(기본 6). 계정 rate limit에 걸리면 낮추면 됩니다
 5. **Admin 계정** — F4-3 콘솔 화면이 없어 권한 변경은 CLI로 합니다.
 
    ```bash

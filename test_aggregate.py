@@ -3,6 +3,8 @@
 
 import io
 import json
+import threading
+import time
 import shutil
 import sys
 import tempfile
@@ -207,6 +209,75 @@ def test_image_anchor_relocation(tmp: Path):
     print("  ✓ 이미지 anchor 재배치(행·열 추종 + 표시 크기 보존)")
 
 
+def test_stage2_parallel(tmp: Path):
+    """2단계는 파일 간 병렬로 돌고, 한 파일의 실패가 다른 파일을 오염시키지 않는다.
+
+    실제 API를 부르지 않는다 — _ai_call을 지연·실패가 흉내나는 스텁으로 바꿔
+    호출 스케줄만 본다(네트워크·비용 없이 결정적으로 검증).
+    """
+    files = []
+    for i in range(6):
+        path = tmp / f"제{i}부서.xlsx"
+        make_book(path, {"예산": [
+            ["사번", "사업내용", "예산액"],
+            [f"{i}-1", "교육 운영", 100],
+            [f"{i}-2", "비품 구매", 200],
+        ]})
+        uf = ag.read_file(path)
+        ag.review_stage1(uf, rules={})
+        assert not uf.issues, [x.line() for x in uf.issues]   # 전부 게이팅 통과
+        files.append(uf)
+
+    DELAY = 0.15
+    calls, peak, active = [], [0], [0]
+    lock = threading.Lock()
+
+    def fake_call(client, model, items):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            calls.append(items[0]["id"])
+        time.sleep(DELAY)
+        with lock:
+            active[0] -= 1
+        # '제3부서'는 서비스 장애를 흉내낸다
+        if any("제3부서" in str(it.get("작성기준", "")) for it in items):
+            raise RuntimeError("모의 장애")
+        return {it["id"]: {"verdict": "부적합", "reason": "모의 판정"} for it in items}
+
+    real_call, real_client = ag._ai_call, ag._ai_client
+    ag._ai_call = fake_call
+    ag._ai_client = lambda: object()          # 클라이언트 생성은 성공한 것으로 둔다
+    try:
+        # 파일명이 payload에 남지 않으므로, 장애 대상 식별용으로 작성기준에 심는다
+        for uf in files:
+            for sheet in uf.sheets:
+                sheet.headers = [f"{h}({uf.dept})" for h in sheet.headers]
+                sheet.col_types = []
+
+        t0 = time.perf_counter()
+        ag.review_stage2_many(files, model="stub", workers=6)
+        elapsed = time.perf_counter() - t0
+    finally:
+        ag._ai_call, ag._ai_client = real_call, real_client
+
+    assert len(calls) == 6, calls
+    assert peak[0] > 1, f"동시에 호출되지 않았다(최대 동시 {peak[0]})"
+    # 6개를 순차로 돌면 6*DELAY, 병렬이면 그보다 확실히 짧다
+    assert elapsed < 6 * DELAY * 0.7, f"병렬 이득이 없다: {elapsed:.2f}s"
+
+    failed = [uf for uf in files if uf.ai_unverified]
+    assert [uf.dept for uf in failed] == ["제3부서"], [uf.dept for uf in failed]
+    assert not failed[0].issues, "장애 파일은 2단계 판정을 남기지 않는다"
+    for uf in files:
+        if uf.ai_unverified:
+            continue
+        # 정상 파일은 부적합 판정이 경고 등급으로 붙는다 (§6.2)
+        assert uf.issues and all(i.grade == ag.WARN and i.stage == "2단계" for i in uf.issues), \
+            [i.line() for i in uf.issues]
+    print("  ✓ 2단계 병렬 호출 + 파일 단위 실패 격리")
+
+
 def test_cli_end_to_end(tmp: Path):
     """CLI 전체 경로: 이상 파일은 기본 제외되고 결과·리포트가 생성된다."""
     work = tmp / "e2e"
@@ -242,7 +313,8 @@ def main() -> int:
     try:
         for fn in (test_structure_and_stage1, test_clean_file_and_gating,
                    test_rules_and_masking, test_synthesis_modes,
-                   test_image_anchor_relocation, test_cli_end_to_end):
+                   test_image_anchor_relocation, test_stage2_parallel,
+                   test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
             fn(sub)

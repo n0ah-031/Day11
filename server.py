@@ -274,14 +274,29 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
                 for sheet in uf.sheets:
                     sheet.col_types = []
 
-        out, columns = [], []
+        # 1단계는 전부 로컬 계산이라 빠르다(명세 규모에서 0.2초)
         for fid, uf in enumerate(session["files"]):
-            report(f"{uf.name} 검토 중", fid, total)
+            report(f"{uf.name} 규칙 검증 중", fid, total)
             if uf.readable:
                 ag.review_stage1(uf, rules)
-                # 파일 단위 게이팅: 1단계 위반이 하나라도 있으면 2단계로 진입하지 않는다 (§4.2)
-                if not uf.issues and not no_ai:
-                    ag.review_stage2(uf, model)
+
+        # 2단계는 파일당 십수 초 걸리는 API 호출이라 한꺼번에 병렬로 돌린다.
+        # 게이팅(§4.2)은 review_stage2_many가 파일 단위로 적용한다.
+        if not no_ai:
+            gated = [uf for uf in session["files"] if uf.readable and not uf.issues]
+            if gated:
+                done = 0
+
+                def ai_progress(uf):
+                    nonlocal done
+                    done += 1
+                    report(f"AI 재검증 중 ({done}/{len(gated)})", done, len(gated))
+
+                report("AI 재검증 중", 0, len(gated))
+                ag.review_stage2_many(session["files"], model, on_done=ai_progress)
+
+        out, columns = [], []
+        for fid, uf in enumerate(session["files"]):
             for sheet in uf.sheets:
                 columns += [h for h in sheet.headers if h]
             file_id = session["file_ids"].get(fid)
