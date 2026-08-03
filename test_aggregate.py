@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """aggregate.py 자체 점검. 실행: python3 test_aggregate.py (프레임워크 없음)"""
 
+import io
 import json
 import shutil
 import sys
@@ -8,6 +9,9 @@ import tempfile
 from pathlib import Path
 
 import openpyxl
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils.units import EMU_to_pixels
+from PIL import Image as PILImage
 
 import aggregate as ag
 
@@ -143,6 +147,66 @@ def test_synthesis_modes(tmp: Path):
     print("  ✓ 합성 모드 A/B/C/D 시트 구성 + 모드 D 수식 기반 요약")
 
 
+def test_image_anchor_relocation(tmp: Path):
+    """합성 시 이미지가 원래 붙어 있던 '그 행 · 그 컬럼'을 따라가야 한다 (§9)."""
+    def make_with_image(path: Path, dept: str):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "실적"
+        ws["A1"] = f"{dept} 실적 보고"
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+        for c, h in enumerate(["사번", "부서", "예산액", "증빙사진"], start=1):
+            ws.cell(row=3, column=c, value=h)
+        for i in range(2):
+            ws.cell(row=4 + i, column=1, value=f"{dept[0]}{i + 1}")
+            ws.cell(row=4 + i, column=2, value=dept)
+            ws.cell(row=4 + i, column=3, value=100 * (i + 1))
+        buf = io.BytesIO()
+        PILImage.new("RGB", (300, 300), (10, 20, 30)).save(buf, format="PNG")
+        buf.seek(0)
+        picture = XLImage(buf)
+        picture.width, picture.height = 96, 72      # 엑셀에서 셀 크기에 맞춰 줄여 놓은 상태
+        ws.add_image(picture, "D4")                 # 데이터 첫 행의 증빙사진 칸
+        wb.save(path)
+
+    def placed(wb, tag):
+        """anchor는 저장 시점에 확정되므로 저장 후 다시 읽어 실제 위치를 본다."""
+        out = tmp / f"{tag}.xlsx"
+        wb.save(out)
+        found = {}
+        for ws in openpyxl.load_workbook(out).worksheets:
+            for im in getattr(ws, "_images", []):
+                frm = im.anchor._from
+                size = getattr(im.anchor, "ext", None)
+                found.setdefault(ws.title, []).append((
+                    frm.row + 1, frm.col + 1,
+                    (EMU_to_pixels(size.cx), EMU_to_pixels(size.cy)) if size else None))
+        return found
+
+    files = []
+    for dept in ("기획부", "총무부"):
+        path = tmp / f"{dept}.xlsx"
+        make_with_image(path, dept)
+        uf = ag.read_file(path)
+        ag.review_stage1(uf, rules={})
+        files.append(uf)
+    assert files[0].sheets[0].images, "원본 이미지를 읽어야 한다"
+
+    # 모드 A: 헤더가 1행으로 당겨지므로 데이터 첫 행은 2행. 컬럼은 그대로 D(4).
+    wb, _ = ag.synthesize(files, "A", {}, [])
+    got = placed(wb, "A")
+    assert got["기획부_실적"] == [(2, 4, (96, 72))], got
+
+    # 모드 B: '부서' 컬럼이 앞에 끼므로 증빙사진은 D→E(5). 행은 파일별 시작 행.
+    wb, _ = ag.synthesize(files, "B", {}, [])
+    assert placed(wb, "B")["실적"] == [(2, 5, (96, 72)), (4, 5, (96, 72))], placed(wb, "B")
+
+    # 모드 C: '구분'+'부서' 2개가 끼므로 D→F(6).
+    wb, _ = ag.synthesize(files, "C", {"실적": "상반기"}, [])
+    assert placed(wb, "C")["상반기"] == [(2, 6, (96, 72)), (4, 6, (96, 72))], placed(wb, "C")
+    print("  ✓ 이미지 anchor 재배치(행·열 추종 + 표시 크기 보존)")
+
+
 def test_cli_end_to_end(tmp: Path):
     """CLI 전체 경로: 이상 파일은 기본 제외되고 결과·리포트가 생성된다."""
     work = tmp / "e2e"
@@ -177,7 +241,8 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
         for fn in (test_structure_and_stage1, test_clean_file_and_gating,
-                   test_rules_and_masking, test_synthesis_modes, test_cli_end_to_end):
+                   test_rules_and_masking, test_synthesis_modes,
+                   test_image_anchor_relocation, test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
             fn(sub)

@@ -22,7 +22,10 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor, TwoCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.units import EMU_to_pixels, pixels_to_EMU
 
 # ── 시스템 기본값 (§5.4: 작성기준 스키마에 값이 없으면 이 값을 사용) ──────────────
 BLANK_ROW_TOLERANCE = 2          # §2.2 데이터 영역 중간 연속 공백 행 허용치
@@ -182,10 +185,17 @@ def _read_images(ws) -> list[dict]:
                 width, height = pim.size
         except Exception:
             width, height = int(im.width or 0), int(im.height or 0)
+        # 표시 크기는 anchor의 ext에만 있다(openpyxl의 im.width/height는 원본 픽셀).
+        ext = getattr(anchor, "ext", None)
+        display = (EMU_to_pixels(ext.cx), EMU_to_pixels(ext.cy)) if ext else None
         out.append({
             "from": (frm.row + 1, frm.col + 1),                       # (row, col) 1-base
             "to": (to.row + 1, to.col + 1) if to else (frm.row + 1, frm.col + 1),
             "single_cell_anchor": to is None,
+            "marker_from": (frm.col, frm.row, frm.colOff, frm.rowOff),  # 0-base + EMU 미세 오프셋
+            "marker_to": (to.col, to.row, to.colOff, to.rowOff) if to else None,
+            "edit_as": getattr(anchor, "editAs", None),
+            "display": display,
             "ext": (getattr(im, "format", "") or "").lower(),
             "bytes": len(data),
             "data": data,
@@ -645,8 +655,28 @@ def _safe_sheet_name(name: str, used: set[str]) -> str:
     return candidate
 
 
-def _add_images(ws, sheet: SheetData, row_offset: int) -> None:
-    """anchor 크기는 유지하고 위치만 행 오프셋만큼 이동 (§9 재배치 규칙)."""
+def _shift_anchor(im: dict, row_offset: int, col_offset: int):
+    """anchor의 종류·점유 범위·표시 크기는 그대로 두고 위치만 옮긴다 (§9 재배치 규칙)."""
+    fc, fr, fco, fro = im["marker_from"]
+    frm = AnchorMarker(col=max(0, fc + col_offset), row=max(0, fr + row_offset),
+                       colOff=fco, rowOff=fro)
+    if im["marker_to"] is None:
+        w, h = im["display"] or im["resolution"]
+        return OneCellAnchor(_from=frm, ext=XDRPositiveSize2D(pixels_to_EMU(w), pixels_to_EMU(h)))
+    tc, tr, tco, tro = im["marker_to"]
+    to = AnchorMarker(col=max(0, tc + col_offset), row=max(0, tr + row_offset),
+                      colOff=tco, rowOff=tro)
+    return TwoCellAnchor(editAs=im["edit_as"] or "twoCell", _from=frm, to=to)
+
+
+def _row_offset(sheet: SheetData, target_first_row: int) -> int:
+    """원본 데이터 첫 행이 결과에서 target_first_row로 가도록 하는 이동량."""
+    origin = sheet.row_numbers[0] if sheet.row_numbers else sheet.header_row + 1
+    return target_first_row - origin
+
+
+def _add_images(ws, sheet: SheetData, row_offset: int, col_offset: int = 0) -> None:
+    """이미지를 원본과 같은 데이터 행·컬럼에 다시 붙인다 (§9)."""
     for im in sheet.images:
         if not im["data"]:
             continue
@@ -654,8 +684,7 @@ def _add_images(ws, sheet: SheetData, row_offset: int) -> None:
             picture = XLImage(io.BytesIO(im["data"]))
         except Exception:
             continue
-        row = im["from"][0] + row_offset
-        ws.add_image(picture, f"{get_column_letter(im['from'][1])}{row}")
+        ws.add_image(picture, _shift_anchor(im, row_offset, col_offset))
 
 
 def _write_block(ws, headers: list[str], rows: list[list], start_row: int) -> int:
@@ -682,7 +711,8 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
             for sheet in uf.sheets:
                 ws = wb.create_sheet(_safe_sheet_name(f"{uf.dept}_{sheet.name}", used))
                 _write_block(ws, sheet.headers, sheet.rows, 1)
-                _add_images(ws, sheet, row_offset=0)         # 모드 A는 anchor 이동 없음
+                # 헤더가 1행으로 당겨지므로 제목행이 있던 만큼 이미지도 위로 올라간다
+                _add_images(ws, sheet, _row_offset(sheet, 2))
         return wb, notes
 
     # B/C/D 공통: 세로 누적. C는 그룹 단위, B/D는 시트명 단위.
@@ -723,7 +753,8 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
             cursor = _write_block(ws, [], rows, cursor)
             if rows:
                 dept_rows.setdefault(title, {})[uf.dept] = (first, cursor - 1)
-            _add_images(ws, sheet, row_offset=first - sheet.row_numbers[0] if sheet.row_numbers else 0)
+            # extra(구분·부서)가 앞에 끼므로 이미지도 그만큼 오른쪽으로 밀어야 한다
+            _add_images(ws, sheet, _row_offset(sheet, first), col_offset=len(extra))
 
     if mode == "D":
         _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes)
