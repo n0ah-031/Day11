@@ -75,11 +75,12 @@ def put_upload(project_id: str, uploader_id: str, local_path: Path, original_nam
     """
     file_id = str(uuid.uuid4())
     storage_path = f"{project_id}/{file_id}.xlsx"
-    _put_object(UPLOAD_BUCKET, storage_path, local_path.read_bytes(), XLSX_MIME)
+    data = local_path.read_bytes()
+    _put_object(UPLOAD_BUCKET, storage_path, data, XLSX_MIME)
     row = _insert("uploaded_files", {
         "id": file_id, "project_id": project_id, "uploader_id": uploader_id,
         "storage_path": storage_path, "original_name": original_name,
-        "kind": "excel", "status": "uploaded",
+        "kind": "excel", "status": "uploaded", "size_bytes": len(data),
     })
     return row
 
@@ -183,3 +184,122 @@ def project_detail(owner_id: str, project_id: str) -> dict | None:
                   "aggregation_jobs(id,mode,status,progress,result_url,error_message,created_at)"})
     rows = res.json()
     return rows[0] if rows else None
+
+
+# ── Admin (F4-3) ──────────────────────────────────────────────────────────────
+def _count(table: str, **filters) -> int:
+    """행 수만 센다. Prefer: count=exact면 본문 대신 Content-Range로 받는다."""
+    params = {"select": "id", "limit": "1", **{k: v for k, v in filters.items()}}
+    res = _rest("GET", f"/{table}", prefer="count=exact", params=params)
+    rng = res.headers.get("content-range", "")
+    return int(rng.split("/")[-1]) if "/" in rng and rng.split("/")[-1].isdigit() else 0
+
+
+def dashboard() -> dict:
+    """§3.2 시스템 현황. API 비용은 집계 경로가 없어 None으로 돌려준다."""
+    jobs = _rest("GET", "/aggregation_jobs", params={"select": "status"}).json()
+    by_status: dict[str, int] = {}
+    for job in jobs:
+        by_status[job["status"]] = by_status.get(job["status"], 0) + 1
+
+    sizes = _rest("GET", "/uploaded_files", params={"select": "size_bytes"}).json()
+    known = [row["size_bytes"] for row in sizes if row.get("size_bytes") is not None]
+    return {
+        "jobs_total": len(jobs),
+        "jobs_by_status": by_status,
+        "users_total": _count("profiles"),
+        "users_active": _count("profiles", status="eq.active"),
+        "files_total": len(sizes),
+        # 이 컬럼 추가 전에 올라온 행은 크기를 모른다. 0으로 단정하지 않고 따로 알린다
+        "storage_bytes": sum(known),
+        "storage_unknown_files": len(sizes) - len(known),
+        "api_cost": None,          # OpenAI 사용량 집계 경로가 아직 없다
+        "retention_days": get_policy().get("retention_days"),
+    }
+
+
+def list_accounts() -> list[dict]:
+    res = _rest("GET", "/profiles", params={
+        "select": "id,employee_no,reset_email,role,status,created_at",
+        "order": "created_at.asc"})
+    return res.json()
+
+
+def patch_account(user_id: str, fields: dict) -> dict | None:
+    allowed = {k: v for k, v in fields.items() if k in ("role", "status")}
+    if not allowed:
+        return None
+    res = _rest("PATCH", "/profiles", prefer="return=representation",
+                params={"id": f"eq.{user_id}"}, json=allowed)
+    rows = res.json()
+    return rows[0] if rows else None
+
+
+def delete_account(user_id: str) -> None:
+    """계정과 그 자료를 지운다.
+
+    DB는 auth.users → profiles → projects → uploaded_files까지 CASCADE로
+    사라지지만 Storage 객체는 대상이 아니다. 프로젝트 목록을 알 수 있는 동안
+    Storage를 먼저 비운다.
+    """
+    projects = _rest("GET", "/projects",
+                     params={"owner_id": f"eq.{user_id}", "select": "id"}).json()
+    for project in projects:
+        for bucket in (UPLOAD_BUCKET, RESULT_BUCKET):
+            _empty_folder(bucket, project["id"])
+    res = httpx.delete(f"{_base()}/auth/v1/admin/users/{user_id}",
+                       headers=_headers(), timeout=TIMEOUT)
+    if res.status_code >= 400:
+        raise RuntimeError(f"계정 삭제 실패: {res.status_code} {res.text[:200]}")
+
+
+def _empty_folder(bucket: str, prefix: str) -> None:
+    listed = httpx.post(f"{_base()}/storage/v1/object/list/{bucket}",
+                        headers=_headers({"Content-Type": "application/json"}),
+                        json={"prefix": f"{prefix}/", "limit": 1000}, timeout=TIMEOUT)
+    if listed.status_code >= 400:
+        return
+    names = [f"{prefix}/{obj['name']}" for obj in listed.json()]
+    if names:
+        httpx.request("DELETE", f"{_base()}/storage/v1/object/{bucket}",
+                      headers=_headers({"Content-Type": "application/json"}),
+                      json={"prefixes": names}, timeout=TIMEOUT)
+
+
+def get_policy() -> dict:
+    rows = _rest("GET", "/retention_policy", params={"select": "key,value"}).json()
+    out = {}
+    for row in rows:
+        value = row["value"]
+        out[row["key"]] = int(value) if str(value).isdigit() else value
+    return out
+
+
+def set_policy(key: str, value, actor_id: str) -> dict:
+    _rest("POST", "/retention_policy", prefer="resolution=merge-duplicates",
+          json={"key": key, "value": str(value), "updated_by": actor_id})
+    return get_policy()
+
+
+def log_action(actor_id: str | None, action: str, target: str = "") -> None:
+    """감사 로그. 기록 실패가 본 작업을 막지는 않는다."""
+    try:
+        _insert("audit_logs", {"actor_id": actor_id, "action": action, "target": target})
+    except Exception:
+        pass
+
+
+def list_logs(q: str = "", limit: int = 200) -> list[dict]:
+    res = _rest("GET", "/audit_logs", params={
+        "select": "id,action,target,created_at,profiles(employee_no)",
+        "order": "created_at.desc", "limit": str(limit)})
+    rows = res.json()
+    for row in rows:
+        profile = row.pop("profiles", None) or {}
+        row["actor"] = profile.get("employee_no") or "(삭제된 계정)"
+    needle = (q or "").strip().lower()
+    if needle:
+        rows = [r for r in rows
+                if needle in r["action"].lower() or needle in (r["target"] or "").lower()
+                or needle in r["actor"].lower()]
+    return rows

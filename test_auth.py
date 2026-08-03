@@ -265,6 +265,101 @@ def test_persistence(client: TestClient):
     return project_id
 
 
+def test_admin_console(client: TestClient):
+    """Admin API는 관리자만 쓸 수 있고, 변경은 감사 로그에 남아야 한다 (F4-3)."""
+    import manage_users
+    import store
+
+    # 일반 사용자에게는 403
+    for path in ("/api/admin/dashboard", "/api/admin/accounts", "/api/admin/logs"):
+        assert client.get(path).status_code == 403, f"{path}가 일반 사용자에게 열렸다"
+
+    assert manage_users.main(["promote", EMP]) == 0
+    try:
+        dash = client.get("/api/admin/dashboard")
+        assert dash.status_code == 200, dash.text
+        d = dash.json()
+        assert d["users_total"] >= 1 and d["users_active"] >= 1, d
+        assert d["retention_days"] == 90, d
+        assert d["api_cost"] is None, "집계 경로가 없으면 0이 아니라 None이어야 한다"
+        assert isinstance(d["storage_bytes"], int), d
+
+        accounts = client.get("/api/admin/accounts").json()["accounts"]
+        me = next(a for a in accounts if a["employee_no"] == EMP)
+        assert me["role"] == "admin", me
+
+        # 본인 계정을 스스로 잠그는 것은 막는다(CLI 말고는 되돌릴 길이 없다)
+        assert client.patch(f"/api/admin/accounts/{me['id']}",
+                            json={"status": "suspended"}).status_code == 400
+        assert client.delete(f"/api/admin/accounts/{me['id']}").status_code == 400
+
+        # 다른 계정은 정지/권한 변경이 된다
+        other_emp = f"zz-test-{uuid.uuid4().hex[:10]}"
+        made = TestClient(server.app).post(
+            "/api/auth/signup",
+            json={"employee_no": other_emp, "password": PW, "reset_email": RESET_EMAIL})
+        other_id = made.json()["profile"]["id"]
+        patched = client.patch(f"/api/admin/accounts/{other_id}", json={"status": "suspended"})
+        assert patched.status_code == 200 and patched.json()["account"]["status"] == "suspended"
+
+        # 보관 정책
+        bad = client.put("/api/admin/policy/retention", json={"retention_days": 0})
+        assert bad.status_code == 400, bad.text
+        ok = client.put("/api/admin/policy/retention", json={"retention_days": 120})
+        assert ok.status_code == 200 and ok.json()["policy"]["retention_days"] == 120, ok.text
+
+        # 감사 로그를 남긴 계정도 지워져야 한다. audit_logs.actor_id가 ON DELETE
+        # 절 없이 profiles를 참조하던 동안에는 '뭔가를 한 사용자'가 삭제 불가였다
+        store.log_action(other_id, "테스트 행위", "삭제 가능 여부 확인")
+        logged = [x for x in client.get("/api/admin/logs").json()["logs"]
+                  if x["action"] == "테스트 행위"]
+        assert logged, "로그가 남지 않아 이 검사가 무의미하다"
+
+        # 삭제 + Storage까지 정리되는지
+        deleted = client.delete(f"/api/admin/accounts/{other_id}")
+        assert deleted.status_code == 200 and deleted.json()["deleted"] == other_emp, deleted.text
+        assert all(a["employee_no"] != other_emp
+                   for a in client.get("/api/admin/accounts").json()["accounts"])
+
+        # 계정이 사라져도 로그는 남고, 행위자만 비워진다(감사 기록의 목적)
+        after = [x for x in client.get("/api/admin/logs").json()["logs"]
+                 if x["action"] == "테스트 행위"]
+        assert after and after[0]["actor"] == "(삭제된 계정)", after
+
+        # 감사 로그에 방금 한 일이 남아야 한다
+        logs = client.get("/api/admin/logs").json()["logs"]
+        actions = [x["action"] for x in logs]
+        assert "계정 변경" in actions and "계정 삭제" in actions and "정책 변경" in actions, actions
+        assert all(x["actor"] for x in logs), logs[:3]
+        # 검색 필터
+        only = client.get("/api/admin/logs?q=정책").json()["logs"]
+        assert only and all("정책" in x["action"] or "정책" in (x["target"] or "") for x in only), only
+        print("  ✓ Admin 콘솔(권한 403 / 지표 / 계정 변경·삭제 / 정책 / 감사 로그)")
+    finally:
+        client.put("/api/admin/policy/retention", json={"retention_days": 90})
+        manage_users.main(["demote", EMP])
+
+
+def test_public_key_reads_nothing():
+    """프론트엔드에 실려 나가는 공개 키로는 아무 데이터도 읽히지 않아야 한다.
+
+    RLS는 켜져 있고 정책은 0개다 — 모든 접근이 백엔드(service key)를 경유하는
+    현 구조에서 이게 가장 안전한 상태다. 정책을 실수로 추가하거나 RLS를 끄면
+    여기서 걸린다.
+    """
+    base = os.environ["SUPABASE_URL"].rstrip("/")
+    pub = os.environ["SUPABASE_PUBLISHABLE_KEY"]
+    headers = {"apikey": pub, "Authorization": f"Bearer {pub}"}
+    for table in ("profiles", "projects", "uploaded_files", "review_results", "aggregation_jobs"):
+        res = httpx.get(f"{base}/rest/v1/{table}", headers=headers,
+                        params={"select": "*"}, timeout=20)
+        # RLS가 행을 감추면 PostgREST는 403이 아니라 빈 배열을 준다
+        assert res.status_code in (200, 401, 403), f"{table} → {res.status_code}"
+        if res.status_code == 200:
+            assert res.json() == [], f"{table}이 공개 키에 노출됐다: {res.text[:200]}"
+    print("  ✓ 공개 키로 데이터 접근 불가(RLS 전면 거부 유지)")
+
+
 def test_logout(client: TestClient):
     assert client.post("/api/auth/logout").status_code == 200
     assert client.get("/api/auth/me").status_code == 401, "로그아웃 후에도 접근되면 안 된다"
@@ -276,9 +371,27 @@ def _delete_user(user_id: str | None) -> None:
         return
     key = auth._secret_key()
     headers = {"apikey": key, "Authorization": f"Bearer {key}"}
-    # profiles는 auth.users FK가 ON DELETE CASCADE라 함께 지워진다
-    httpx.delete(f"{os.environ['SUPABASE_URL']}/auth/v1/admin/users/{user_id}",
-                 headers=headers, timeout=20)
+    # profiles는 auth.users FK가 ON DELETE CASCADE라 함께 지워진다.
+    # 실패를 조용히 넘기면 테스트 계정이 쌓이므로 상태 코드를 확인한다 —
+    # 실제로 audit_logs FK 때문에 삭제가 막히던 것을 이걸 안 봐서 놓쳤다.
+    res = httpx.delete(f"{os.environ['SUPABASE_URL']}/auth/v1/admin/users/{user_id}",
+                       headers=headers, timeout=20)
+    assert res.status_code < 400, f"테스트 계정 삭제 실패: {res.status_code} {res.text[:300]}"
+
+
+def _delete_test_logs() -> None:
+    """테스트가 남긴 감사 로그를 지운다.
+
+    행위자 계정을 지우면 로그는 actor_id=NULL로 남는다(감사 기록의 목적).
+    실제 운영 기록과 섞이지 않게 테스트 흔적은 걷어낸다.
+    """
+    key = auth._secret_key()
+    headers = {"apikey": key, "Authorization": f"Bearer {key}",
+               "Content-Type": "application/json"}
+    base = os.environ["SUPABASE_URL"].rstrip("/")
+    for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료"):
+        httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
+                     params={"actor_id": "is.null", "action": f"eq.{action}"})
 
 
 def _delete_storage_for_owner(owner_id: str | None) -> None:
@@ -329,11 +442,14 @@ def main() -> int:
         test_isolation(sid)
         test_role_and_suspend(client)
         test_persistence(client)
+        test_admin_console(client)
+        test_public_key_reads_nothing()
         test_logout(client)
     finally:
         # 사용자를 지우면 프로젝트도 CASCADE로 사라지므로 Storage를 먼저 훑는다
         _delete_storage_for_owner(created_user_id)
         _delete_user(created_user_id)
+        _delete_test_logs()
     print("\n전체 통과")
     return 0
 

@@ -69,7 +69,7 @@ python3 test_auth.py
 
 앞의 두 개는 7개·6개 시나리오가 전부 통과해야 정상이며 **네트워크·API 키 없이** 돌아갑니다(AI 계층은 스텁, 인증은 `AUTH_DISABLED=1`로 끔).
 
-`test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 9개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
+`test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 10개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
 
 ---
 
@@ -100,6 +100,8 @@ python3 test_auth.py
 | F4-1 사번 로그인 | 사번 → `{사번}@internal.local` 가상 이메일로 Supabase Auth 위임. 사번은 대소문자 무관. 토큰은 httpOnly·SameSite=Lax 쿠키, 검증은 JWKS(ES256) 로컬. 취합 API 전체에 인증 + 세션·잡 소유자 격리(§6.2) |
 | 영속화 | 업로드 xlsx는 Storage `uploads`, 결과·리포트는 `results`. 기록은 `projects`·`uploaded_files`·`review_results`·`aggregation_jobs`. 취합 시작 시 프로젝트 자동 생성 |
 | F4-2 작업 이력 | [ui/history.html](ui/history.html) — 검색(작업명·파일명)·유형 필터(전체/엑셀/한글), 과거 결과 재다운로드. 세션이 사라진 뒤에도 동작 |
+| F4-3 Admin 콘솔 | [ui/admin.html](ui/admin.html) — 지표 카드, 계정 권한·정지·삭제, 보관 기간, 사용 로그(검색). 관리자만 접근하고 본인 계정은 스스로 잠그거나 지울 수 없다 |
+| 감사 로그 | 계정 변경·삭제, 정책 변경, 취합 완료를 `audit_logs`에 남긴다. 행위자 계정이 지워지면 `actor_id`만 NULL이 되고 기록은 남는다 |
 
 ### 미구현 (의도적 제외)
 
@@ -109,7 +111,8 @@ python3 test_auth.py
 |---|---|
 | 작업 재개 | 재시작 후 **기록과 산출물은 남지만** 중단된 취합을 그 자리에서 이어서 하지는 못한다. 파싱된 작업 집합이 메모리에 있어 되살리려면 파일을 다시 내려받아 다시 읽어야 한다 |
 | 진행 중 잡 상태 | `aggregation_jobs`에 남기지만 폴링용 상태는 프로세스 메모리라, 재시작하면 진행률 추적이 끊긴다(기록은 남음) |
-| Admin 콘솔(F4-3) | 화면 미착수. 권한·정지는 `manage_users.py`로 임시 처리 |
+| 업로드 제한 화면 조정 | 파일당 50MB·30개·500MB는 `server.py` 상수다. Admin 화면에 값만 보여주고 바꾸는 기능은 없다 |
+| 보관 기간 자동 삭제 | 값은 `retention_policy`에 저장되지만 기간이 지난 자료를 실제로 지우는 배치가 없다 |
 | hwpx 병합(F3) | 미착수. 명세상 별도 기능 |
 | 이미지 AI Vision | 명세 §14에서 v2 백로그로 지정된 항목 |
 | 파일 간 교차 중복 | 명세 §14 v2 백로그. 중복 판정은 파일 내부로 한정 |
@@ -124,11 +127,12 @@ python3 test_auth.py
 | [server.py](server.py) | FastAPI. 세션·잡 모두 프로세스 메모리 `dict` + 임시 디렉터리라 **서버 재시작 시 소실**. 긴 작업은 `_start_job`으로 스레드에 넘기고 `GET /api/job/{jid}` 폴링. `/api` 라우트 뒤에 `ui/`를 정적 마운트 |
 | [ui/aggregate.html](ui/aggregate.html) | 취합 4단계 단일 페이지. Tailwind CDN + 바닐라 JS, 빌드 없음. 토큰·셸은 `index.html`에서 그대로 이식 |
 | [auth.py](auth.py) | F4-1 인증. 가상 이메일 치환·가입·로그인·JWT 검증. 가상 이메일은 이 모듈 밖으로 안 나간다 |
-| [manage_users.py](manage_users.py) | 계정 CLI(`list`/`promote`/`demote`/`suspend`/`activate`). F4-3 화면이 나오면 대체된다 |
+| [manage_users.py](manage_users.py) | 계정 CLI(`list`/`promote`/`demote`/`suspend`/`activate`). Admin 화면이 생겼으니 첫 관리자 지정·복구용으로만 남긴다 |
 | [store.py](store.py) | Supabase 영속화. Storage 업로드·다운로드, 기록 insert/patch, 이력 조회 |
 | [ui/login.html](ui/login.html) | 로그인·회원가입 (design.md 화면 1). aggregate.html과 토큰·테마 셸 공유 |
 | [ui/history.html](ui/history.html) | 작업 이력 (design.md 화면 9). 검색·유형 필터·재다운로드 |
-| [test_auth.py](test_auth.py) | 인증·영속화·이력 9개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다** |
+| [ui/admin.html](ui/admin.html) | Admin 콘솔 (design.md 화면 10). 지표·계정·정책·사용 로그 |
+| [test_auth.py](test_auth.py) | 인증·영속화·이력·Admin 10개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다** |
 | [test_server.py](test_server.py) | API 6개 시나리오(end-to-end / 강제 포함 / 업로드 거부 / 키 컬럼 / 선택 입력 컬럼 / 잡 진행률) |
 
 `server.py`는 `aggregate.py`를 import만 하고 수정하지 않습니다. `main()`과 동일한 순서(`read_file` → `review_stage1` → 게이팅 → `review_stage2_many` → `preprocess` → `synthesize` → `write_report`)를 호출하므로 CLI와 웹이 같은 코드 경로를 탑니다.
@@ -220,16 +224,15 @@ python3 test_auth.py
    - 선택 입력 컬럼: 지정이 없으면 **전 컬럼이 필수**입니다. 비고·특이사항처럼 비워두는 칸이 있으면 그 파일 전체가 '이상'이 되어 취합에서 기본 제외됩니다
    - CLI에서는 `--rules` JSON의 `"key": true` / `"required": false`로 지정합니다
 4. **2단계 AI 병렬화 실측** — 병렬 경로는 들어갔지만(§4 참조) 실제 키로 순차 대비 배수를 재보지 않았습니다. 업무 파일 여러 개로 한 번 재고, 느리면 `AI_CONCURRENCY`를 올려보세요(기본 6). 계정 rate limit에 걸리면 낮추면 됩니다
-5. **Admin 계정** — F4-3 콘솔 화면이 없어 권한 변경은 CLI로 합니다.
+5. **첫 관리자 지정** — 계정 관리는 이제 `/admin.html`에서 하지만, 첫 관리자는 화면에 들어갈 수 없으니 CLI로 올립니다.
 
    ```bash
-   python3 manage_users.py list
    python3 manage_users.py promote admin01
    ```
 
-   비밀번호는 이 도구가 다루지 않습니다 — 가입은 `/login.html`에서 본인이 하고, CLI는 이미 있는 계정의 `role`·`status`만 바꿉니다. 사번은 대소문자를 구분하지 않습니다
+   비밀번호는 이 도구가 다루지 않습니다 — 가입은 `/login.html`에서 본인이 합니다. 사번은 대소문자를 구분하지 않습니다
 
-6. **RLS 정책** — 접근 모델(소유자 기준)이 확정됐으니 이제 쓸 수 있습니다. 현재는 정책 없이 RLS만 켜 전면 거부 상태이고 서버가 service key로 우회합니다. 프론트가 Supabase를 직접 호출하지 않으므로 급하지는 않지만, 방어선 한 겹을 더하는 값은 있습니다
+6. **RLS 정책은 지금 쓸 일이 아닙니다.** RLS는 켜져 있고 정책이 0개라 `anon`·`authenticated`는 전면 거부이며, 모든 접근이 백엔드(service key)를 경유합니다. 공개 키로 조회하면 전 테이블이 빈 배열임을 테스트가 지킵니다. 소유자 기반 정책을 쓰면 오히려 `authenticated`에게 읽기를 **열어주는** 셈이라, 프론트가 Supabase를 직접 호출하도록 구조를 바꿀 때 함께 쓰는 것이 맞습니다
 7. **Supabase** — 프로젝트는 정해졌습니다. 새 계정의 `chwihap-app`(ref `cfchnprkizcmfymlezyo`, ap-northeast-2 서울)이며 `supabase link` 완료 상태입니다
 
    기존 `ksw1727@gmail.com's Project`는 쓰지 않습니다. 그 `public` 스키마에는 사고 보고 시스템이 19개 테이블로 돌아가고 있어 섞이면 안 됩니다. Preview branch는 병합하면 결국 같은 production DB로 들어가 격리 수단이 못 되고, 전용 스키마를 써도 `supabase_migrations` 이력을 공유해 두 저장소의 `db push`가 간섭합니다 — 별도 프로젝트만이 완전히 분리됩니다

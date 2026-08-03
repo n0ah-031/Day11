@@ -129,6 +129,70 @@ def auth_me(user: dict = User) -> dict:
     return {"profile": user, "auth_enabled": not _auth_disabled()}
 
 
+def require_admin(user: dict = User) -> dict:
+    """§3.2 Admin 전용. 권한이 없으면 403."""
+    if not _auth_disabled() and user.get("role") != "admin":
+        raise HTTPException(403, "관리자 권한이 필요합니다.")
+    if not store.enabled():
+        raise HTTPException(503, "Supabase가 설정되지 않아 관리자 기능을 쓸 수 없습니다.")
+    return user
+
+
+Admin = Depends(require_admin)
+
+
+@app.get("/api/admin/dashboard")
+def admin_dashboard(admin: dict = Admin) -> dict:
+    return store.dashboard()
+
+
+@app.get("/api/admin/accounts")
+def admin_accounts(admin: dict = Admin) -> dict:
+    return {"accounts": store.list_accounts()}
+
+
+@app.patch("/api/admin/accounts/{user_id}")
+def admin_patch_account(user_id: str, body: dict = Body(...), admin: dict = Admin) -> dict:
+    if user_id == admin.get("id") and (body.get("role") == "user"
+                                       or body.get("status") == "suspended"):
+        # 마지막 관리자가 스스로를 잠가버리면 CLI 말고는 되돌릴 방법이 없다
+        raise HTTPException(400, "본인 계정의 권한·상태는 이 화면에서 바꿀 수 없습니다.")
+    row = store.patch_account(user_id, body)
+    if row is None:
+        raise HTTPException(404, "계정을 찾을 수 없거나 바꿀 수 있는 항목이 없습니다.")
+    changed = ", ".join(f"{k}={v}" for k, v in body.items() if k in ("role", "status"))
+    store.log_action(admin.get("id"), "계정 변경", f"{row['employee_no']} ({changed})")
+    return {"account": row}
+
+
+@app.delete("/api/admin/accounts/{user_id}")
+def admin_delete_account(user_id: str, admin: dict = Admin) -> dict:
+    if user_id == admin.get("id"):
+        raise HTTPException(400, "본인 계정은 삭제할 수 없습니다.")
+    target = next((a for a in store.list_accounts() if a["id"] == user_id), None)
+    if target is None:
+        raise HTTPException(404, "계정을 찾을 수 없습니다.")
+    store.delete_account(user_id)
+    # 계정이 사라지면 누가 지웠는지만 남는다(대상 사번은 문자열로 보존)
+    store.log_action(admin.get("id"), "계정 삭제", target["employee_no"])
+    return {"deleted": target["employee_no"]}
+
+
+@app.put("/api/admin/policy/retention")
+def admin_set_retention(body: dict = Body(...), admin: dict = Admin) -> dict:
+    days = body.get("retention_days")
+    if not isinstance(days, int) or not 1 <= days <= 3650:
+        raise HTTPException(400, "보관 기간은 1~3650일 사이의 정수로 입력해주세요.")
+    policy = store.set_policy("retention_days", days, admin.get("id"))
+    store.log_action(admin.get("id"), "정책 변경", f"retention_days={days}")
+    return {"policy": policy}
+
+
+@app.get("/api/admin/logs")
+def admin_logs(q: str = "", admin: dict = Admin) -> dict:
+    return {"logs": store.list_logs(q=q)}
+
+
 @app.get("/api/history")
 def history(q: str = "", type: str = "", user: dict = User) -> dict:
     """F4-2 이력. 본인 프로젝트만 돌려준다 (§6.2).
@@ -401,6 +465,8 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
             store.put_result(session["project_id"], job_id, report_path, "report")
             store.update_job(job_id, status="done", progress=100, result_url=result_url,
                              stats_json=payload["metrics"])
+            store.log_action(session["owner"], "취합 완료",
+                            f"모드 {mode} · {len(selected)}건")
         return payload
 
     return _start_job(work, user["id"])

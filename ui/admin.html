@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>취합 (Chwi-hap) - 관리자 콘솔</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+
+<!-- 저장된 테마를 페인트 전에 적용 (전환 시 흰 화면 깜빡임 방지) -->
+<script>
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem('theme'); } catch (e) {}
+    var dark = saved ? saved === 'dark'
+                     : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.classList.toggle('dark', dark);
+  })();
+</script>
+
+<script id="tailwind-config">
+  // 색상은 채널값 CSS 변수를 참조한다. rgb(var(--x) / <alpha-value>) 형태여야
+  // bg-primary/20 같은 투명도 유틸리티가 라이트·다크 양쪽에서 동작한다.
+  const token = (name) => `rgb(var(${name}) / <alpha-value>)`;
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "primary": token("--primary"),
+          "primary-container": token("--primary-container"),
+          "on-primary": token("--on-primary"),
+          "secondary": token("--secondary"),
+          "secondary-container": token("--secondary-container"),
+          "tertiary": token("--tertiary"),
+          "tertiary-container": token("--tertiary-container"),
+          "background": token("--background"),
+          "surface": token("--surface"),
+          "surface-variant": token("--surface-variant"),
+          "surface-container": token("--surface-container"),
+          "surface-container-low": token("--surface-container-low"),
+          "surface-container-high": token("--surface-container-high"),
+          "surface-container-highest": token("--surface-container-highest"),
+          "on-surface": token("--on-surface"),
+          "on-surface-variant": token("--on-surface-variant"),
+          "outline": token("--outline"),
+          "outline-variant": token("--outline-variant"),
+          "error": token("--error")
+        },
+        borderRadius: {
+          "DEFAULT": "var(--radius)",
+          "lg": "var(--radius-lg)",
+          "xl": "var(--radius-xl)",
+          "full": "9999px"
+        },
+        spacing: {
+          "lg": "40px", "gutter": "24px", "base": "4px", "md": "24px",
+          "container-max": "1200px", "xl": "64px", "sm": "16px", "xs": "8px"
+        },
+        fontFamily: {
+          "headline-xl": ["Noto Sans"], "headline-lg": ["Noto Sans"], "headline-md": ["Noto Sans"],
+          "body-lg": ["Noto Sans"], "body-md": ["Noto Sans"], "body-sm": ["Noto Sans"],
+          "label-md": ["Noto Sans"], "label-sm": ["Noto Sans"]
+        },
+        fontSize: {
+          "headline-xl": ["36px", {"lineHeight": "44px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+          "headline-lg": ["28px", {"lineHeight": "36px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+          "headline-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+          "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+          "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+          "body-sm": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+          "label-md": ["14px", {"lineHeight": "16px", "fontWeight": "500"}],
+          "label-sm": ["12px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600"}]
+        },
+        boxShadow: {
+          "soft": "var(--shadow-soft)",
+          "soft-hover": "var(--shadow-soft-hover)"
+        }
+      }
+    }
+  };
+</script>
+
+<style>
+  /* 라이트 — stitch_ (1): Soft Lavender / 둥근 코너 / 부드러운 그림자 */
+  :root {
+    --primary: 138 132 255;
+    --primary-container: 230 228 255;
+    --on-primary: 255 255 255;
+    --secondary: 127 199 189;
+    --secondary-container: 214 242 238;
+    --tertiary: 255 179 138;
+    --tertiary-container: 255 234 214;
+    --background: 253 251 255;
+    --surface: 255 255 255;
+    --surface-variant: 245 243 255;
+    --surface-container: 245 243 255;
+    --surface-container-low: 250 249 255;
+    --surface-container-high: 240 238 255;
+    --surface-container-highest: 235 232 255;
+    --on-surface: 45 45 58;
+    --on-surface-variant: 91 91 110;
+    --outline: 209 209 224;
+    --outline-variant: 235 235 245;
+    --error: 255 138 138;
+
+    --radius: 1rem;
+    --radius-lg: 1.25rem;
+    --radius-xl: 2rem;
+    --shadow-soft: 0 8px 30px rgb(138 132 255 / 0.08);
+    --shadow-soft-hover: 0 12px 40px rgb(138 132 255 / 0.12);
+    --glass-bg: 255 255 255 / 0.7;
+    --glass-border: 255 255 255 / 0.8;
+    --blob-opacity: 0.05;
+  }
+
+  /* 다크 — stitch_ (2): Vibrant Indigo / 각진 코너 / 글로우 */
+  .dark {
+    --primary: 79 70 229;
+    --primary-container: 55 48 163;
+    --on-primary: 255 255 255;
+    --secondary: 129 140 248;
+    --secondary-container: 49 46 129;
+    --tertiary: 192 132 252;
+    --tertiary-container: 88 28 135;
+    --background: 2 6 23;
+    --surface: 15 23 42;
+    --surface-variant: 30 41 59;
+    --surface-container: 30 41 59;
+    --surface-container-low: 15 23 42;
+    --surface-container-high: 51 65 85;
+    --surface-container-highest: 71 85 105;
+    --on-surface: 241 245 249;
+    --on-surface-variant: 148 163 184;
+    --outline: 51 65 85;
+    --outline-variant: 30 41 59;
+    --error: 239 68 68;
+
+    --radius: 0.375rem;
+    --radius-lg: 0.75rem;
+    --radius-xl: 1rem;
+    --shadow-soft: 0 0 15px rgb(79 70 229 / 0.1);
+    --shadow-soft-hover: 0 0 20px rgb(79 70 229 / 0.2);
+    --glass-bg: 15 23 42 / 0.6;
+    --glass-border: 51 65 85 / 0.5;
+    --blob-opacity: 0.12;
+  }
+
+  body {
+    font-family: 'Noto Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+  .glass-card {
+    background: rgb(var(--glass-bg));
+    backdrop-filter: blur(12px);
+    border: 1px solid rgb(var(--glass-border));
+  }
+  /* 다크 모드에서만 입력창에 글로우를 얹는다 (라이트는 soft shadow 유지) */
+  .dark .glow-border { box-shadow: 0 0 15px rgb(var(--primary) / 0.1); }
+  .dark .glow-border:focus-within {
+    border-color: rgb(var(--primary) / 0.8);
+    box-shadow: 0 0 20px rgb(var(--primary) / 0.2);
+  }
+  .blob { opacity: var(--blob-opacity); }
+</style>
+</head>
+
+<body class="bg-background text-on-surface">
+<header class="fixed top-0 w-full z-50 bg-surface/80 backdrop-blur-md border-b border-outline-variant">
+<div class="flex justify-between items-center h-16 px-gutter max-w-container-max mx-auto">
+<a class="text-headline-lg font-headline-lg font-bold text-primary tracking-tight" href="index.html">취합</a>
+<div class="flex items-center gap-4">
+<nav class="hidden md:flex items-center gap-8">
+<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="aggregate.html">취합</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="history.html">이력</a>
+<span class="px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-label-sm font-label-sm text-primary">관리자</span>
+<span id="nav-user" class="hidden text-body-sm font-body-sm text-on-surface-variant"></span>
+<button id="nav-logout" class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
+</nav>
+<button id="theme-toggle" type="button" aria-label="라이트/다크 모드 전환"
+        class="flex items-center justify-center w-10 h-10 rounded-full border border-outline-variant text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined" id="theme-icon">dark_mode</span>
+</button>
+</div>
+</div>
+</header>
+
+<main class="pt-24 pb-xl px-gutter max-w-container-max mx-auto">
+<h1 class="text-headline-xl font-headline-xl font-bold">관리자 콘솔</h1>
+<p class="mt-2 text-body-md font-body-md text-on-surface-variant">시스템 현황과 계정·정책을 관리합니다.</p>
+
+<div id="error" class="hidden mt-md rounded-xl border border-error/40 bg-error/10 px-5 py-4 text-body-sm font-body-sm text-on-surface"></div>
+<div id="notice" class="hidden mt-md rounded-xl border border-primary/40 bg-primary/10 px-5 py-4 text-body-sm font-body-sm text-on-surface"></div>
+
+<!-- 지표 카드 -->
+<div id="metrics" class="mt-md grid grid-cols-2 lg:grid-cols-4 gap-4"></div>
+
+<!-- 정책 -->
+<section class="mt-lg rounded-xl glass-card shadow-soft p-6">
+<h2 class="text-headline-md font-headline-md font-semibold">정책</h2>
+<div class="mt-4 flex flex-wrap items-end gap-4">
+<label class="flex flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">보관 기간(일)</span>
+<input id="retention" type="number" min="1" max="3650" step="1"
+       class="w-40 rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</label>
+<button id="save-retention"
+        class="px-6 py-3 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 transition-all disabled:opacity-40">
+저장
+</button>
+<p class="text-body-sm font-body-sm text-on-surface-variant">기간이 지난 자료의 자동 삭제는 아직 구현되지 않았습니다 — 값만 보관합니다.</p>
+</div>
+<div class="mt-4 flex flex-wrap gap-6 text-body-sm font-body-sm text-on-surface-variant">
+<span>업로드 제한: 파일당 <strong class="text-on-surface">50MB</strong></span>
+<span>1회 최대 <strong class="text-on-surface">30개</strong></span>
+<span>합계 <strong class="text-on-surface">500MB</strong></span>
+<span class="text-on-surface-variant">(서버 상수 — 화면에서 바꾸는 기능은 미구현)</span>
+</div>
+</section>
+
+<!-- 계정 -->
+<section class="mt-lg rounded-xl glass-card shadow-soft p-6">
+<h2 class="text-headline-md font-headline-md font-semibold">계정</h2>
+<div class="mt-4 overflow-x-auto">
+<table class="w-full min-w-[52rem] text-left">
+<thead>
+<tr class="text-label-sm font-label-sm text-on-surface-variant border-b border-outline-variant">
+<th class="py-3 pr-4">사번</th>
+<th class="py-3 pr-4">재설정 이메일</th>
+<th class="py-3 pr-4">권한</th>
+<th class="py-3 pr-4">상태</th>
+<th class="py-3 pr-4">가입일</th>
+<th class="py-3">작업</th>
+</tr>
+</thead>
+<tbody id="accounts"></tbody>
+</table>
+</div>
+</section>
+
+<!-- 사용 로그 -->
+<section class="mt-lg rounded-xl glass-card shadow-soft p-6">
+<div class="flex flex-wrap items-center gap-3">
+<h2 class="text-headline-md font-headline-md font-semibold">사용 로그</h2>
+<span class="flex-1"></span>
+<div class="flex items-center gap-2 rounded-xl bg-surface border border-outline-variant px-4 py-2 glow-border">
+<span class="material-symbols-outlined text-on-surface-variant">search</span>
+<input id="log-q" type="search" placeholder="사번·작업·대상으로 검색"
+       class="bg-transparent border-0 p-0 text-body-sm text-on-surface placeholder:text-on-surface-variant focus:ring-0">
+</div>
+</div>
+<div class="mt-4 overflow-x-auto">
+<table class="w-full min-w-[40rem] text-left">
+<thead>
+<tr class="text-label-sm font-label-sm text-on-surface-variant border-b border-outline-variant">
+<th class="py-3 pr-4">시각</th>
+<th class="py-3 pr-4">사번</th>
+<th class="py-3 pr-4">작업</th>
+<th class="py-3">대상</th>
+</tr>
+</thead>
+<tbody id="logs"></tbody>
+</table>
+</div>
+</section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  // created_at은 UTC(timestamptz)로 온다 — 보는 사람의 시간대로 변환한다
+  const when = (iso) => {
+    const d = new Date(iso);
+    if (isNaN(d)) return String(iso || '').slice(0, 16).replace('T', ' ');
+    const p2 = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} `
+         + `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  };
+
+  const bytes = (n) => {
+    if (n == null) return '—';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let v = n, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+    return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)}${units[i]}`;
+  };
+
+  function paintTheme() {
+    $('theme-icon').textContent = document.documentElement.classList.contains('dark')
+      ? 'light_mode' : 'dark_mode';
+  }
+  $('theme-toggle').addEventListener('click', () => {
+    const dark = document.documentElement.classList.toggle('dark');
+    try { localStorage.setItem('theme', dark ? 'dark' : 'light'); } catch (e) {}
+    paintTheme();
+  });
+  paintTheme();
+
+  const showError = (m) => { $('error').textContent = m; $('error').classList.remove('hidden'); };
+  const showNotice = (m) => {
+    $('notice').textContent = m;
+    $('notice').classList.remove('hidden');
+    setTimeout(() => $('notice').classList.add('hidden'), 4000);
+  };
+  const clearError = () => $('error').classList.add('hidden');
+
+  async function api(path, opts) {
+    const res = await fetch(path, opts);
+    if (res.status === 401) { location.href = '/login.html'; throw new Error('로그인이 필요합니다.'); }
+    if (res.status === 403) { location.href = '/aggregate.html'; throw new Error('관리자 권한이 필요합니다.'); }
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && body.detail) || `요청에 실패했습니다. (HTTP ${res.status})`);
+    return body;
+  }
+
+  const json = (method, body) => ({
+    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+
+  function card(label, value, note) {
+    return `<div class="rounded-xl glass-card shadow-soft p-5 flex flex-col gap-1">
+      <span class="text-label-sm font-label-sm text-on-surface-variant">${esc(label)}</span>
+      <span class="text-headline-lg font-headline-lg font-bold text-on-surface">${esc(value)}</span>
+      ${note ? `<span class="text-body-sm font-body-sm text-on-surface-variant">${esc(note)}</span>` : ''}
+    </div>`;
+  }
+
+  async function loadDashboard() {
+    const d = await api('/api/admin/dashboard');
+    const by = d.jobs_by_status || {};
+    const parts = Object.entries(by).map(([k, v]) => `${k} ${v}`).join(' · ');
+    $('metrics').innerHTML = [
+      card('전체 작업 건수', d.jobs_total, parts || '아직 없음'),
+      card('활성 사용자', d.users_active, `전체 ${d.users_total}명`),
+      card('보관 용량', bytes(d.storage_bytes),
+           d.storage_unknown_files
+             ? `파일 ${d.files_total}개 · 크기 미기록 ${d.storage_unknown_files}개 제외`
+             : `업로드 원본 ${d.files_total}개 기준`),
+      // 집계 경로가 없으면 0으로 단정하지 않고 미집계임을 밝힌다
+      card('API 비용', d.api_cost == null ? '미집계' : d.api_cost,
+           d.api_cost == null ? 'OpenAI 사용량 집계 미구현' : '')
+    ].join('');
+    if (d.retention_days != null && !$('retention').value) $('retention').value = d.retention_days;
+  }
+
+  const ROLE_LABEL = { admin: '관리자', user: '일반' };
+  const STATUS_LABEL = { active: '활성', suspended: '정지' };
+
+  async function loadAccounts() {
+    const { accounts } = await api('/api/admin/accounts');
+    $('accounts').innerHTML = accounts.map((a) => {
+      const self = a.id === window.__me;
+      const suspended = a.status === 'suspended';
+      const btn = (act, label, cls) =>
+        `<button data-act="${act}" data-id="${esc(a.id)}" data-emp="${esc(a.employee_no)}"
+           class="px-3 py-1.5 rounded-lg border text-label-sm font-label-sm transition-all ${cls}">${label}</button>`;
+      return `<tr class="border-b border-outline-variant/60 text-body-sm font-body-sm">
+        <td class="py-3 pr-4 font-semibold text-on-surface">${esc(a.employee_no)}${self ? ' <span class="text-on-surface-variant">(본인)</span>' : ''}</td>
+        <td class="py-3 pr-4 text-on-surface-variant max-w-[16rem] truncate" title="${esc(a.reset_email)}">${esc(a.reset_email)}</td>
+        <td class="py-3 pr-4">${esc(ROLE_LABEL[a.role] || a.role)}</td>
+        <td class="py-3 pr-4">
+          <span class="px-2.5 py-1 rounded-full border text-label-sm font-label-sm ${
+            suspended ? 'bg-error/10 text-error border-error/40'
+                      : 'bg-primary/10 text-primary border-primary/30'}">${esc(STATUS_LABEL[a.status] || a.status)}</span>
+        </td>
+        <td class="py-3 pr-4 text-on-surface-variant">${esc(when(a.created_at))}</td>
+        <td class="py-3">${self ? '<span class="text-on-surface-variant">—</span>' : `<div class="flex flex-wrap gap-2">
+          ${btn(a.role === 'admin' ? 'demote' : 'promote',
+                a.role === 'admin' ? '일반으로' : '관리자로',
+                'border-outline-variant text-on-surface-variant hover:border-primary/40 hover:text-primary')}
+          ${btn(suspended ? 'activate' : 'suspend', suspended ? '활성화' : '정지',
+                'border-outline-variant text-on-surface-variant hover:border-primary/40 hover:text-primary')}
+          ${btn('delete', '삭제', 'border-error/40 text-error hover:bg-error/10')}
+        </div>`}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="6" class="py-6 text-body-sm text-on-surface-variant">계정이 없습니다.</td></tr>';
+
+    $('accounts').querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => act(b.dataset.act, b.dataset.id, b.dataset.emp));
+    });
+  }
+
+  async function act(action, id, emp) {
+    clearError();
+    try {
+      if (action === 'delete') {
+        // 계정과 그 자료가 모두 사라지므로 사번을 직접 입력받아 확인한다
+        const typed = prompt(`'${emp}' 계정과 업로드·취합 자료가 모두 삭제됩니다.\n되돌릴 수 없습니다.\n\n확인하려면 사번을 그대로 입력하세요:`);
+        if (typed == null) return;
+        if (typed.trim().toLowerCase() !== emp.toLowerCase()) return showError('사번이 일치하지 않아 취소했습니다.');
+        const r = await api(`/api/admin/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        showNotice(`'${r.deleted}' 계정을 삭제했습니다.`);
+      } else {
+        const body = action === 'promote' ? { role: 'admin' }
+                   : action === 'demote' ? { role: 'user' }
+                   : action === 'suspend' ? { status: 'suspended' }
+                   : { status: 'active' };
+        await api(`/api/admin/accounts/${encodeURIComponent(id)}`, json('PATCH', body));
+        showNotice(`'${emp}' 계정을 변경했습니다.`);
+      }
+      await Promise.all([loadAccounts(), loadDashboard(), loadLogs()]);
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  $('save-retention').addEventListener('click', async () => {
+    clearError();
+    const days = parseInt($('retention').value, 10);
+    $('save-retention').disabled = true;
+    try {
+      await api('/api/admin/policy/retention', json('PUT', { retention_days: days }));
+      showNotice(`보관 기간을 ${days}일로 저장했습니다.`);
+      await Promise.all([loadDashboard(), loadLogs()]);
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      $('save-retention').disabled = false;
+    }
+  });
+
+  async function loadLogs() {
+    const q = $('log-q').value.trim();
+    const { logs } = await api('/api/admin/logs' + (q ? `?q=${encodeURIComponent(q)}` : ''));
+    $('logs').innerHTML = logs.map((l) => `<tr class="border-b border-outline-variant/60 text-body-sm font-body-sm">
+      <td class="py-3 pr-4 text-on-surface-variant">${esc(when(l.created_at))}</td>
+      <td class="py-3 pr-4 text-on-surface">${esc(l.actor)}</td>
+      <td class="py-3 pr-4">${esc(l.action)}</td>
+      <td class="py-3 text-on-surface-variant">${esc(l.target || '—')}</td>
+    </tr>`).join('') || `<tr><td colspan="4" class="py-6 text-body-sm text-on-surface-variant">${
+      q ? '조건에 맞는 기록이 없습니다.' : '아직 기록이 없습니다.'}</td></tr>`;
+  }
+
+  let timer = null;
+  $('log-q').addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => loadLogs().catch((e) => showError(e.message)), 250);
+  });
+
+  $('nav-logout').addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    location.href = '/login.html';
+  });
+
+  (async function start() {
+    const res = await fetch('/api/auth/me');
+    if (res.status === 401) { location.href = '/login.html'; return; }
+    const { profile, auth_enabled } = await res.json();
+    if (auth_enabled && profile.role !== 'admin') { location.href = '/aggregate.html'; return; }
+    window.__me = profile.id;
+    if (auth_enabled) {
+      $('nav-user').textContent = profile.employee_no;
+      $('nav-user').classList.remove('hidden');
+    }
+    try {
+      await Promise.all([loadDashboard(), loadAccounts(), loadLogs()]);
+    } catch (e) {
+      showError(e.message);
+    }
+  })();
+</script>
+</body>
+</html>
