@@ -29,6 +29,10 @@ def book_bytes(rows: list[list]) -> bytes:
 
 CLEAN = [["사번", "부서", "예산액"], ["A1", "기획부", 100], ["A2", "기획부", 200]]
 BROKEN = [["사번", "부서", "예산액"], ["B1", "총무부", None]]      # 필수값 누락 → 오류
+# 첫 컬럼이 행마다 반복 + 키워드 헤더 없음 → 자동 추정이 키를 부서로 잡아 오탐
+REPEATED = [["부서", "성명", "예산액"],
+            ["기획부", "김하나", 100],
+            ["기획부", "이두리", 200]]
 
 
 def upload(sid: str, items: list[tuple[str, bytes]]):
@@ -100,9 +104,24 @@ def test_upload_rejected():
     print("  ✓ 업로드 거부(.xlsx 아님) + 없는 세션 404")
 
 
+def test_key_column():
+    """첫 컬럼이 반복되면 키 충돌로 오탐 → key_col로 고유 컬럼을 지정하면 정상."""
+    sid = new_session()
+    res = upload(sid, [("영업부.xlsx", book_bytes(REPEATED))])
+    assert res.status_code == 200, res.text
+    assert res.json()["files"][0]["sheets"][0]["headers"] == ["부서", "성명", "예산액"], res.json()
+
+    res = client.post(f"/api/session/{sid}/review", json={"no_ai": True})
+    assert res.json()["files"][0]["status"] == "이상", res.json()["files"][0]
+
+    res = client.post(f"/api/session/{sid}/review", json={"no_ai": True, "key_col": "성명"})
+    assert res.json()["files"][0]["status"] == "정상", res.json()["files"][0]
+    print("  ✓ key_col 지정으로 키 충돌 오탐 해소")
+
+
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
-    for fn in (test_end_to_end, test_forced_include, test_upload_rejected):
+    for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column):
         fn()
     print("\n전체 통과")
     return 0

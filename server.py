@@ -46,8 +46,10 @@ def _file_view(fid: int, uf) -> dict:
         "readable": uf.readable,
         # §2.1 읽기 실패 사유는 read_file이 남긴 첫 이슈의 사유 그대로
         "reason": (uf.issues[0].reason if not uf.readable and uf.issues else None),
+        # headers는 UI의 키 컬럼 선택지 재료
         "sheets": [{"name": s.name, "header_row": s.header_row, "rows": len(s.rows),
-                    "cols": len(s.headers), "images": len(s.images)} for s in uf.sheets],
+                    "cols": len(s.headers), "images": len(s.images), "headers": s.headers}
+                   for s in uf.sheets],
     }
 
 
@@ -86,13 +88,16 @@ def review(sid: str, body: dict = Body(default={})) -> dict:
     session = _session(sid)
     no_ai = bool((body or {}).get("no_ai"))
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+    # 키 컬럼을 사용자가 고르면 엔진의 rules 경로로 넘긴다. 비우면 엔진 자동 추정
+    key_col = (body or {}).get("key_col")
+    rules = {key_col: {"key": True}} if key_col else {}
     # 재검토 시 이슈가 누적되지 않도록 원본에서 다시 읽는다
     session["files"] = [ag.read_file(uf.path) for uf in session["files"]]
 
     out, columns = [], []
     for fid, uf in enumerate(session["files"]):
         if uf.readable:
-            ag.review_stage1(uf, rules={})
+            ag.review_stage1(uf, rules)
             # 파일 단위 게이팅: 1단계 위반이 하나라도 있으면 2단계로 진입하지 않는다 (§4.2)
             if not uf.issues and not no_ai:
                 ag.review_stage2(uf, model)

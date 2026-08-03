@@ -249,6 +249,15 @@
 
 <div id="file-list" class="mt-md grid grid-cols-1 gap-4"></div>
 
+<!-- 키 컬럼: 작업 단위 전역 1개. 파일 업로드 전에는 숨긴다 -->
+<div id="key-col-panel" class="hidden mt-md rounded-xl glass-card shadow-soft p-6 flex flex-col gap-2">
+<label class="text-body-md font-body-md font-semibold text-on-surface" for="key-col">키 컬럼</label>
+<select id="key-col"
+        class="rounded-lg bg-surface border border-outline-variant text-body-sm font-body-sm text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</select>
+<p class="text-body-sm font-body-sm text-on-surface-variant">부서명처럼 행마다 반복되는 컬럼이 키가 되면 중복·충돌 오류가 잘못 뜹니다. 행마다 고유한 컬럼을 고르세요.</p>
+</div>
+
 <div class="mt-md flex flex-wrap items-center justify-between gap-4">
 <label class="flex items-center gap-2 text-body-sm font-body-sm text-on-surface-variant cursor-pointer">
 <input id="no-ai" type="checkbox" class="rounded border-outline text-primary focus:ring-primary/40">
@@ -370,6 +379,7 @@ AI 검증 없이 빠르게 검토
     sid: null,
     step: 1,
     files: [],          // 1단계 응답
+    keyCol: '',         // 키 컬럼(빈 값이면 엔진 자동)
     review: null,       // 2단계 응답
     included: new Set(),
     mode: 'A',
@@ -489,7 +499,19 @@ AI 검증 없이 빠르게 검토
       </div>`;
     }).join('');
     $('btn-review').disabled = !state.files.some((f) => f.readable);
+    renderKeyCol();
   }
+
+  function renderKeyCol() {
+    // 전 파일·전 시트 헤더의 합집합(순서 보존·중복 제거)
+    const heads = [...new Set(state.files.flatMap((f) => (f.sheets || []).flatMap((s) => s.headers || []))
+                                         .filter(Boolean))];
+    $('key-col-panel').classList.toggle('hidden', !heads.length);
+    $('key-col').innerHTML = '<option value="">자동 (첫 컬럼 또는 사번·코드 등 키워드)</option>'
+      + heads.map((h) => `<option value="${esc(h)}"${state.keyCol === h ? ' selected' : ''}>${esc(h)}</option>`).join('');
+  }
+
+  $('key-col').addEventListener('change', () => { state.keyCol = $('key-col').value; });
 
   $('btn-review').addEventListener('click', async () => {
     clearError();
@@ -498,7 +520,7 @@ AI 검증 없이 빠르게 검토
       state.review = await api(`/api/session/${state.sid}/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ no_ai: $('no-ai').checked })
+        body: JSON.stringify({ no_ai: $('no-ai').checked, key_col: state.keyCol || null })
       });
       state.included = new Set(state.review.files.filter((f) => f.default_checked).map((f) => f.fid));
       renderReview();
