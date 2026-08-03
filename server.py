@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+from datetime import datetime
 import uuid
 from pathlib import Path
 
@@ -22,11 +23,13 @@ from fastapi.staticfiles import StaticFiles
 
 import aggregate as ag
 import auth
+import store
 
 BASE = Path(__file__).parent
 MAX_FILE_MB = 50            # 파일 1개 상한
 MAX_SESSION_FILES = 30      # 세션 누적 파일 수 상한
 MAX_SESSION_MB = 500        # 세션 누적 용량 상한
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 ag.load_env(BASE / ".env")
 app = FastAPI(title="엑셀 취합")
@@ -127,6 +130,37 @@ def auth_me(user: dict = User) -> dict:
     return {"profile": user, "auth_enabled": not _auth_disabled()}
 
 
+@app.get("/api/history")
+def history(user: dict = User) -> dict:
+    """F4-2 이력의 재료. 본인 프로젝트만 돌려준다 (§6.2)."""
+    if not store.enabled() or not user["id"]:
+        return {"projects": []}
+    return {"projects": store.list_projects(user["id"])}
+
+
+@app.get("/api/history/{project_id}")
+def history_detail(project_id: str, user: dict = User) -> dict:
+    if not store.enabled() or not user["id"]:
+        raise HTTPException(404, "이력을 찾을 수 없습니다.")
+    detail = store.project_detail(user["id"], project_id)
+    if detail is None:
+        # 남의 프로젝트는 존재 자체를 알리지 않는다
+        raise HTTPException(404, "이력을 찾을 수 없습니다.")
+    return detail
+
+
+@app.get("/api/history/{project_id}/download/{job_id}")
+def history_download(project_id: str, job_id: str, user: dict = User):
+    """이력에서 과거 취합 결과를 내려받는다. 세션이 사라진 뒤에도 동작한다."""
+    detail = history_detail(project_id, user)
+    job = next((j for j in detail.get("aggregation_jobs", []) if j["id"] == job_id), None)
+    if job is None or not job.get("result_url"):
+        raise HTTPException(404, "결과 파일이 없습니다.")
+    data = store.get_object(store.RESULT_BUCKET, job["result_url"])
+    return Response(content=data, media_type=XLSX_MIME,
+                    headers={"Content-Disposition": 'attachment; filename="merged.xlsx"'})
+
+
 @app.get("/api/job/{jid}")
 def job_status(jid: str, user: dict = User) -> dict:
     job = JOBS.get(jid)
@@ -151,10 +185,15 @@ def _file_view(fid: int, uf) -> dict:
 
 @app.post("/api/session")
 def create_session(user: dict = User) -> dict:
+    """취합 작업 1건 = 프로젝트 1개. 사용자가 고르는 UI는 아직 없어 자동 생성한다."""
     sid = uuid.uuid4().hex
-    SESSIONS[sid] = {"dir": Path(tempfile.mkdtemp(prefix="agg-")), "files": [], "bytes": 0,
-                     "owner": user["id"]}
-    return {"sid": sid}
+    session = SESSIONS[sid] = {"dir": Path(tempfile.mkdtemp(prefix="agg-")), "files": [],
+                               "bytes": 0, "owner": user["id"], "project_id": None,
+                               "file_ids": {}}
+    if store.enabled() and user["id"]:
+        name = f"엑셀 취합 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        session["project_id"] = store.create_project(user["id"], name)
+    return {"sid": sid, "project_id": session["project_id"]}
 
 
 @app.post("/api/session/{sid}/files")
@@ -185,7 +224,12 @@ async def upload_files(sid: str, files: list[UploadFile] = File(...), user: dict
     def work(report):
         for i, path in enumerate(pending):
             report(f"{path.name} 구조를 읽는 중", i, len(pending))
-            session["files"].append(ag.read_file(path))
+            uf = ag.read_file(path)
+            session["files"].append(uf)
+            if session["project_id"]:
+                # 파일 자체를 Storage에 남겨야 재시작 후에도 원본이 살아 있다
+                row = store.put_upload(session["project_id"], session["owner"], path, path.name)
+                session["file_ids"][len(session["files"]) - 1] = row["id"]
         report("구조 인식 완료", len(pending), len(pending))
         # fid는 세션 내 인덱스이므로 누적된 전체 목록을 돌려준다
         return {"files": [_file_view(i, uf) for i, uf in enumerate(session["files"])]}
@@ -235,6 +279,12 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
                     ag.review_stage2(uf, model)
             for sheet in uf.sheets:
                 columns += [h for h in sheet.headers if h]
+            file_id = session["file_ids"].get(fid)
+            if file_id:
+                store.save_review(file_id, uf.grade,
+                                  [{"sheet": i.sheet, "cell": i.cell, "column": i.attr,
+                                    "kind": i.kind, "stage": i.stage, "grade": i.grade,
+                                    "reason": i.reason} for i in uf.issues])
             out.append({
                 "fid": fid,
                 "name": uf.name,
@@ -263,31 +313,51 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
     if not selected:
         raise HTTPException(400, "취합 가능한 파일이 없습니다.")
 
+    mode = body.get("mode", "B")
+    job_id = None
+    if session["project_id"]:
+        job_id = store.create_job(session["project_id"], mode,
+                                  [session["file_ids"][i] for i in picked if i in session["file_ids"]],
+                                  body.get("summary_cols") or [])
+        session["job_id"] = job_id
+
     def work(report_fn):
         steps = 4
-        report_fn("오류 리포트를 쓰는 중", 0, steps)
-        report_path = session["dir"] / "error_report.xlsx"
-        ag.write_report(files, report_path)
-        session["report"] = report_path
 
-        report_fn("자동교정하는 중", 1, steps)
-        for uf in selected:
-            ag.preprocess(uf)
-        session["preprocessed"] = True      # 셀 값이 바뀌었으니 재검토 시 원본을 다시 읽어야 한다
+        def step(label: str, done: int) -> None:
+            report_fn(label, done, steps)
+            if job_id:
+                store.update_job(job_id, progress=int(done / steps * 100))
 
-        report_fn("시트를 합치는 중", 2, steps)
-        wb, notes = ag.synthesize(selected, body.get("mode", "B"),
-                                  body.get("group_map") or {}, body.get("summary_cols") or [])
+        try:
+            step("오류 리포트를 쓰는 중", 0)
+            report_path = session["dir"] / "error_report.xlsx"
+            ag.write_report(files, report_path)
+            session["report"] = report_path
 
-        report_fn("결과 파일을 저장하는 중", 3, steps)
-        result = session["dir"] / "merged.xlsx"
-        wb.save(result)
-        session["result"] = result
-        report_fn("취합 완료", steps, steps)
+            step("자동교정하는 중", 1)
+            for uf in selected:
+                ag.preprocess(uf)
+            session["preprocessed"] = True   # 셀 값이 바뀌었으니 재검토 시 원본을 다시 읽어야 한다
+
+            step("시트를 합치는 중", 2)
+            wb, notes = ag.synthesize(selected, mode,
+                                      body.get("group_map") or {}, body.get("summary_cols") or [])
+
+            step("결과 파일을 저장하는 중", 3)
+            result = session["dir"] / "merged.xlsx"
+            wb.save(result)
+            session["result"] = result
+        except Exception as exc:
+            # 실패도 기록에 남겨야 이력에서 무슨 일이 있었는지 알 수 있다
+            if job_id:
+                store.update_job(job_id, status="failed", error_message=f"{type(exc).__name__}: {exc}")
+            raise
+        step("취합 완료", steps)
 
         # Fix에는 컬럼명이 없으므로 같은 셀의 이슈에서 작성기준을 끌어온다
         attr_of = {(i.file, i.sheet, i.cell): i.attr for uf in selected for i in uf.issues}
-        return {
+        payload = {
             "metrics": {
                 "aggregated": len(selected),
                 "sheets": len(wb.sheetnames),
@@ -306,6 +376,12 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
                               for i in uf.issues if i.grade == ag.ERROR],
             "notes": list(dict.fromkeys(notes)),
         }
+        if job_id:
+            result_url = store.put_result(session["project_id"], job_id, result, "merged")
+            store.put_result(session["project_id"], job_id, report_path, "report")
+            store.update_job(job_id, status="done", progress=100, result_url=result_url,
+                             stats_json=payload["metrics"])
+        return payload
 
     return _start_job(work, user["id"])
 
@@ -317,7 +393,7 @@ def download(sid: str, kind: str, user: dict = User):
     if not path or not Path(path).exists():
         raise HTTPException(404, "아직 생성되지 않은 파일입니다.")
     return FileResponse(path, filename=Path(path).name,
-                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        media_type=XLSX_MIME)
 
 
 # 정적 UI는 반드시 마지막에 마운트한다(먼저 걸면 /api 라우트가 가려진다)
