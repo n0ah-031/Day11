@@ -83,13 +83,24 @@ def test_signup_and_login():
     dup = client.post("/api/auth/signup",
                       json={"employee_no": EMP, "password": PW, "reset_email": RESET_EMAIL})
     assert dup.status_code == 409, dup.text
-    print("  ✓ 가입(입력 검증 + 사번 중복 409)")
+
+    # 대소문자만 다른 사번도 같은 사번이다. 가상 이메일이 소문자라 여기서
+    # 걸러내지 않으면 Auth 쪽에서 이메일 중복으로 늦게 터진다
+    dup2 = client.post("/api/auth/signup",
+                       json={"employee_no": EMP.upper(), "password": PW, "reset_email": RESET_EMAIL})
+    assert dup2.status_code == 409, f"대소문자 변형이 통과했다: {dup2.status_code} {dup2.text}"
+    print("  ✓ 가입(입력 검증 + 사번 중복 409, 대소문자 무관)")
 
     # 틀린 비밀번호 — 사번 존재 여부를 노출하지 않는 같은 메시지
     wrong = client.post("/api/auth/login", json={"employee_no": EMP, "password": "wrong-pw-123"})
     missing = client.post("/api/auth/login", json={"employee_no": "zz-none", "password": PW})
     assert wrong.status_code == missing.status_code == 401, (wrong.text, missing.text)
     assert wrong.json()["detail"] == missing.json()["detail"], "계정 열거가 가능하면 안 된다"
+
+    # 대문자로 입력해도 같은 계정으로 로그인된다
+    upper = client.post("/api/auth/login", json={"employee_no": EMP.upper(), "password": PW})
+    assert upper.status_code == 200, upper.text
+    assert upper.json()["profile"]["employee_no"] == EMP, upper.json()
 
     ok = client.post("/api/auth/login", json={"employee_no": EMP, "password": PW})
     assert ok.status_code == 200, ok.text
@@ -144,6 +155,30 @@ def test_isolation(sid: str):
         _delete_user(other_id)
 
 
+def test_role_and_suspend(client: TestClient):
+    """manage_users.py로 바꾼 권한·상태가 즉시 반영돼야 한다."""
+    import manage_users
+
+    assert manage_users.main(["promote", EMP.upper()]) == 0, "대소문자 무관하게 찾아야 한다"
+    assert client.get("/api/auth/me").json()["profile"]["role"] == "admin"
+
+    assert manage_users.main(["demote", EMP]) == 0
+    assert client.get("/api/auth/me").json()["profile"]["role"] == "user"
+
+    # 정지는 이미 발급된 토큰에도 즉시 걸려야 한다 (매 요청 status 확인)
+    assert manage_users.main(["suspend", EMP]) == 0
+    blocked = client.get("/api/auth/me")
+    assert blocked.status_code == 403, f"{blocked.status_code} {blocked.text}"
+    assert "정지" in blocked.json()["detail"]
+    # 정지 상태에서는 새로 로그인도 막힌다
+    assert client.post("/api/auth/login",
+                       json={"employee_no": EMP, "password": PW}).status_code == 403
+
+    assert manage_users.main(["activate", EMP]) == 0
+    assert client.get("/api/auth/me").status_code == 200
+    print("  ✓ 권한 변경 + 계정 정지(발급된 토큰에도 즉시 적용)")
+
+
 def test_logout(client: TestClient):
     assert client.post("/api/auth/logout").status_code == 200
     assert client.get("/api/auth/me").status_code == 401, "로그아웃 후에도 접근되면 안 된다"
@@ -169,6 +204,7 @@ def main() -> int:
         client = test_signup_and_login()
         sid = test_authenticated_flow(client)
         test_isolation(sid)
+        test_role_and_suspend(client)
         test_logout(client)
     finally:
         _delete_user(created_user_id)

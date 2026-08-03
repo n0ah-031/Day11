@@ -63,8 +63,18 @@ def configured() -> bool:
                      or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")))
 
 
+def _normalize(employee_no: str) -> str:
+    """사번은 대소문자를 구분하지 않는다.
+
+    가상 이메일을 소문자로 만들면서 저장값은 입력 그대로 두면, Postgres의
+    대소문자 구분 UNIQUE 때문에 `Admin01`과 `admin01`이 중복 검사를 통과한
+    뒤 Auth 쪽에서 같은 이메일로 충돌한다. 한 곳에서 소문자로 맞춰 둔다.
+    """
+    return (employee_no or "").strip().lower()
+
+
 def _virtual_email(employee_no: str) -> str:
-    return f"{employee_no.lower()}@{VIRTUAL_EMAIL_DOMAIN}"
+    return f"{employee_no}@{VIRTUAL_EMAIL_DOMAIN}"
 
 
 def _auth_url(path: str) -> str:
@@ -95,7 +105,7 @@ def _detail(res: httpx.Response, fallback: str) -> str:
 # ── 가입 ──────────────────────────────────────────────────────────────────────
 def signup(employee_no: str, password: str, reset_email: str) -> dict:
     """사번으로 가입. 가입 제한은 없고 Admin이 status로 사후 통제한다 (F4-1)."""
-    employee_no = (employee_no or "").strip()
+    employee_no = _normalize(employee_no)
     reset_email = (reset_email or "").strip()
     if not EMPLOYEE_NO_RE.match(employee_no):
         raise HTTPException(400, "사번은 영문·숫자 3~32자로 입력해주세요.")
@@ -136,7 +146,7 @@ def signup(employee_no: str, password: str, reset_email: str) -> dict:
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
 def login(employee_no: str, password: str) -> dict:
-    employee_no = (employee_no or "").strip()
+    employee_no = _normalize(employee_no)
     if not employee_no or not password:
         raise HTTPException(400, "사번과 비밀번호를 입력해주세요.")
     with httpx.Client(timeout=20) as client:
@@ -173,7 +183,7 @@ def request_password_reset(employee_no: str) -> None:
     """
     with httpx.Client(timeout=20) as client:
         res = client.get(_rest_url("/profiles"), headers=_secret_headers(),
-                         params={"employee_no": f"eq.{(employee_no or '').strip()}",
+                         params={"employee_no": f"eq.{_normalize(employee_no)}",
                                  "select": "reset_email"})
         rows = res.json() if res.status_code == 200 else []
         if not rows:
