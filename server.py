@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
-from datetime import datetime
 import uuid
 from pathlib import Path
 
@@ -131,11 +130,16 @@ def auth_me(user: dict = User) -> dict:
 
 
 @app.get("/api/history")
-def history(user: dict = User) -> dict:
-    """F4-2 이력의 재료. 본인 프로젝트만 돌려준다 (§6.2)."""
+def history(q: str = "", type: str = "", user: dict = User) -> dict:
+    """F4-2 이력. 본인 프로젝트만 돌려준다 (§6.2).
+
+    type은 design.md 화면 9의 유형 필터(전체/엑셀/hwpx)에 대응한다.
+    hwpx(F3)는 미착수라 지금은 항상 빈 목록이 된다.
+    """
     if not store.enabled() or not user["id"]:
         return {"projects": []}
-    return {"projects": store.list_projects(user["id"])}
+    kind = {"excel": "excel", "hwpx": "hwpx"}.get(type, "")
+    return {"projects": store.list_projects(user["id"], q=q, kind=kind)}
 
 
 @app.get("/api/history/{project_id}")
@@ -191,8 +195,9 @@ def create_session(user: dict = User) -> dict:
                                "bytes": 0, "owner": user["id"], "project_id": None,
                                "file_ids": {}}
     if store.enabled() and user["id"]:
-        name = f"엑셀 취합 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        session["project_id"] = store.create_project(user["id"], name)
+        # 이름에 시각을 넣지 않는다 — 서버 시간대로 굳어버려 DB의 created_at(UTC)을
+        # 보는 사람 시간대로 변환한 값과 어긋난다. 시각은 created_at만 쓴다.
+        session["project_id"] = store.create_project(user["id"], "엑셀 취합")
     return {"sid": sid, "project_id": session["project_id"]}
 
 

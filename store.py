@@ -139,11 +139,38 @@ def put_result(project_id: str, job_id: str, local_path: Path, label: str) -> st
 
 
 # ── 이력 (F4-2의 재료) ────────────────────────────────────────────────────────
-def list_projects(owner_id: str, limit: int = 50) -> list[dict]:
+def list_projects(owner_id: str, q: str = "", kind: str = "", limit: int = 200) -> list[dict]:
+    """이력 목록. 검색·유형 필터는 파일명까지 봐야 하므로 여기서 걸러낸다.
+
+    PostgREST로 중첩 테이블(파일명)을 걸러내려면 쿼리가 복잡해지는데,
+    §6.1 규모(사용자당 90일 보관)에서는 목록이 크지 않아 이득이 없다.
+    """
     res = _rest("GET", "/projects", params={
-        "owner_id": f"eq.{owner_id}", "select": "id,name,created_at",
+        "owner_id": f"eq.{owner_id}",
+        "select": "id,name,created_at,"
+                  "uploaded_files(original_name,kind,status),"
+                  "aggregation_jobs(id,kind,mode,status,progress,result_url,error_message,created_at)",
         "order": "created_at.desc", "limit": str(limit)})
-    return res.json()
+    rows = res.json()
+
+    needle = (q or "").strip().lower()
+    for row in rows:
+        row["file_names"] = [f["original_name"] for f in row.get("uploaded_files") or []]
+        row["jobs"] = sorted(row.pop("aggregation_jobs", None) or [],
+                             key=lambda j: j["created_at"], reverse=True)
+        # 유형은 취합 잡이 있으면 그 kind, 없으면 업로드 파일의 kind를 따른다
+        kinds = {j["kind"] for j in row["jobs"]} | {f["kind"] for f in row.get("uploaded_files") or []}
+        row["kind"] = ("excel" if "excel" in kinds else next(iter(kinds), "excel"))
+        row["file_count"] = len(row["file_names"])
+        row.pop("uploaded_files", None)
+
+    if kind:
+        rows = [r for r in rows if r["kind"] == kind]
+    if needle:
+        rows = [r for r in rows
+                if needle in r["name"].lower()
+                or any(needle in n.lower() for n in r["file_names"])]
+    return rows
 
 
 def project_detail(owner_id: str, project_id: str) -> dict | None:

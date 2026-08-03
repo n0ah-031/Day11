@@ -244,8 +244,24 @@ def test_persistence(client: TestClient):
 
     # 목록에도 보이고, 남의 이력은 404
     projects = client.get("/api/history").json()["projects"]
-    assert any(p["id"] == project_id for p in projects), projects
+    mine = next((p for p in projects if p["id"] == project_id), None)
+    assert mine, projects
+    assert mine["file_names"] == ["기획부.xlsx"] and mine["file_count"] == 1, mine
+    assert mine["kind"] == "excel" and mine["jobs"][0]["status"] == "done", mine
     print("  ✓ 영속화(Storage 원본 + DB 기록 + 세션 없이 이력 다운로드)")
+
+    # 화면 9의 검색·유형 필터가 실제로 걸러내야 한다
+    def ids(**params):
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        return [p["id"] for p in client.get(f"/api/history?{qs}").json()["projects"]]
+
+    assert project_id in ids(q="기획부"), "파일명으로 찾아야 한다"
+    assert project_id in ids(q="기획"), "부분 일치로 찾아야 한다"
+    assert project_id in ids(q="엑셀"), "작업명으로도 찾아야 한다"
+    assert project_id not in ids(q="없는파일명zzz"), "안 맞으면 빠져야 한다"
+    assert project_id in ids(type="excel"), "엑셀 유형에 잡혀야 한다"
+    assert project_id not in ids(type="hwpx"), "hwpx 유형에는 안 잡혀야 한다"
+    print("  ✓ 이력 검색·유형 필터")
     return project_id
 
 

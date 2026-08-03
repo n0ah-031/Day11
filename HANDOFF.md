@@ -69,7 +69,7 @@ python3 test_auth.py
 
 앞의 두 개는 6개·6개 시나리오가 전부 통과해야 정상이며 **네트워크·API 키 없이** 돌아갑니다(AI 계층은 스텁, 인증은 `AUTH_DISABLED=1`로 끔).
 
-`test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 7개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
+`test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 9개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
 
 ---
 
@@ -98,6 +98,8 @@ python3 test_auth.py
 | 선택 입력 컬럼 지정 | 업로드 단계에서 비워둬도 되는 컬럼을 다중 선택. 작성기준 `{헤더명: {"required": false}}`로 전달. 미지정 시 종전대로 전 컬럼 필수 (PRD v1.9 F2-14) |
 | 진행률 폴링 | 업로드 파싱·검토·취합이 즉시 `{job_id}`를 돌려주고 `GET /api/job/{jid}`로 단계·진행률을 폴링. 잡 상태는 프로세스 메모리 (PRD v1.9 F2-15) |
 | F4-1 사번 로그인 | 사번 → `{사번}@internal.local` 가상 이메일로 Supabase Auth 위임. 사번은 대소문자 무관. 토큰은 httpOnly·SameSite=Lax 쿠키, 검증은 JWKS(ES256) 로컬. 취합 API 전체에 인증 + 세션·잡 소유자 격리(§6.2) |
+| 영속화 | 업로드 xlsx는 Storage `uploads`, 결과·리포트는 `results`. 기록은 `projects`·`uploaded_files`·`review_results`·`aggregation_jobs`. 취합 시작 시 프로젝트 자동 생성 |
+| F4-2 작업 이력 | [ui/history.html](ui/history.html) — 검색(작업명·파일명)·유형 필터(전체/엑셀/한글), 과거 결과 재다운로드. 세션이 사라진 뒤에도 동작 |
 
 ### 미구현 (의도적 제외)
 
@@ -106,9 +108,9 @@ python3 test_auth.py
 | 미구현 | 사유 / 다음 단계 |
 |---|---|
 
-| DB/Storage | 결과를 로컬 파일로 씀. `review_results` 등 테이블 없음 |
-| 비동기 잡(DB) | 진행률 폴링은 구현됨(아래 참조). 다만 잡 상태가 프로세스 메모리라 `aggregation_jobs` 테이블은 여전히 없음 |
-| 이력(F4-2) | 미착수. DB/Storage 도입이 선행 조건 |
+| 작업 재개 | 재시작 후 **기록과 산출물은 남지만** 중단된 취합을 그 자리에서 이어서 하지는 못한다. 파싱된 작업 집합이 메모리에 있어 되살리려면 파일을 다시 내려받아 다시 읽어야 한다 |
+| 진행 중 잡 상태 | `aggregation_jobs`에 남기지만 폴링용 상태는 프로세스 메모리라, 재시작하면 진행률 추적이 끊긴다(기록은 남음) |
+
 | Admin 콘솔(F4-3) | 화면 미착수. 권한·정지는 `manage_users.py`로 임시 처리 |
 | hwpx 병합(F3) | 미착수. 명세상 별도 기능 |
 | 이미지 AI Vision | 명세 §14에서 v2 백로그로 지정된 항목 |
@@ -125,8 +127,10 @@ python3 test_auth.py
 | [ui/aggregate.html](ui/aggregate.html) | 취합 4단계 단일 페이지. Tailwind CDN + 바닐라 JS, 빌드 없음. 토큰·셸은 `index.html`에서 그대로 이식 |
 | [auth.py](auth.py) | F4-1 인증. 가상 이메일 치환·가입·로그인·JWT 검증. 가상 이메일은 이 모듈 밖으로 안 나간다 |
 | [manage_users.py](manage_users.py) | 계정 CLI(`list`/`promote`/`demote`/`suspend`/`activate`). F4-3 화면이 나오면 대체된다 |
+| [store.py](store.py) | Supabase 영속화. Storage 업로드·다운로드, 기록 insert/patch, 이력 조회 |
 | [ui/login.html](ui/login.html) | 로그인·회원가입 (design.md 화면 1). aggregate.html과 토큰·테마 셸 공유 |
-| [test_auth.py](test_auth.py) | 인증 7개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다** |
+| [ui/history.html](ui/history.html) | 작업 이력 (design.md 화면 9). 검색·유형 필터·재다운로드 |
+| [test_auth.py](test_auth.py) | 인증·영속화·이력 9개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다** |
 | [test_server.py](test_server.py) | API 6개 시나리오(end-to-end / 강제 포함 / 업로드 거부 / 키 컬럼 / 선택 입력 컬럼 / 잡 진행률) |
 
 `server.py`는 `aggregate.py`를 import만 하고 수정하지 않습니다. `main()`과 동일한 순서(`read_file` → `review_stage1` → 게이팅 → `review_stage2` → `preprocess` → `synthesize` → `write_report`)를 호출하므로 CLI와 웹이 같은 코드 경로를 탑니다.
@@ -223,7 +227,8 @@ python3 test_auth.py
 
    비밀번호는 이 도구가 다루지 않습니다 — 가입은 `/login.html`에서 본인이 하고, CLI는 이미 있는 계정의 `role`·`status`만 바꿉니다. 사번은 대소문자를 구분하지 않습니다
 
-6. **Supabase** — 프로젝트는 정해졌습니다. 새 계정의 `chwihap-app`(ref `cfchnprkizcmfymlezyo`, ap-northeast-2 서울)이며 `supabase link` 완료 상태입니다
+6. **RLS 정책** — 접근 모델(소유자 기준)이 확정됐으니 이제 쓸 수 있습니다. 현재는 정책 없이 RLS만 켜 전면 거부 상태이고 서버가 service key로 우회합니다. 프론트가 Supabase를 직접 호출하지 않으므로 급하지는 않지만, 방어선 한 겹을 더하는 값은 있습니다
+7. **Supabase** — 프로젝트는 정해졌습니다. 새 계정의 `chwihap-app`(ref `cfchnprkizcmfymlezyo`, ap-northeast-2 서울)이며 `supabase link` 완료 상태입니다
 
    기존 `ksw1727@gmail.com's Project`는 쓰지 않습니다. 그 `public` 스키마에는 사고 보고 시스템이 19개 테이블로 돌아가고 있어 섞이면 안 됩니다. Preview branch는 병합하면 결국 같은 production DB로 들어가 격리 수단이 못 되고, 전용 스키마를 써도 `supabase_migrations` 이력을 공유해 두 저장소의 `db push`가 간섭합니다 — 별도 프로젝트만이 완전히 분리됩니다
 
@@ -231,6 +236,6 @@ python3 test_auth.py
 
    **보안 결함을 하나 고쳤습니다** — 그 10개 테이블 전부 RLS가 꺼진 채 `anon`에 SELECT·INSERT·UPDATE·DELETE 권한이 있었습니다. anon 키는 프론트엔드에 실려 공개되는 값이라 키만 있으면 누구나 전 테이블을 읽고 지울 수 있는 상태였고, `supabase db advisors`도 10건 전부를 ERROR/EXTERNAL로 지적했습니다. [supabase/migrations/20260803065832_enable_rls.sql](supabase/migrations/20260803065832_enable_rls.sql)로 RLS를 켰고 재진단 ERROR 0건입니다. 정책은 인증(F4-1)이 들어와 접근 모델이 정해진 뒤에 씁니다
 
-7. **미해결 — 마이그레이션 baseline**. 원격 이력의 `0001`·`0002`는 SQL이 저장소에 없어 remote-only로 남아 있습니다. 저장소만으로 DB를 재구축할 수 없다는 뜻입니다. `supabase db pull`이 Docker를 요구하는데 이 머신에 Docker Desktop이 없습니다 — 설치 후 `supabase db pull baseline --linked`로 한 번 떠두면 해소됩니다
+8. **미해결 — 마이그레이션 baseline**. 원격 이력의 `0001`·`0002`는 SQL이 저장소에 없어 remote-only로 남아 있습니다. 저장소만으로 DB를 재구축할 수 없다는 뜻입니다. `supabase db pull`이 Docker를 요구하는데 이 머신에 Docker Desktop이 없습니다 — 설치 후 `supabase db pull baseline --linked`로 한 번 떠두면 해소됩니다
 
-8. **CLI 로그인 주의** — `supabase login`이 기본 프로필의 토큰을 새 계정으로 덮었습니다. 기존 ksw1727 계정을 다시 쓰려면 재로그인이 필요합니다. 또 `~/.supabase/profile`이 설정 파일 없는 프로필명(`chwihap`)을 가리켜 `db query`가 `failed to read profile`로 죽길래 `profile.disabled`로 옮겨뒀습니다(되돌리려면 파일명만 복구)
+9. **CLI 로그인 주의** — `supabase login`이 기본 프로필의 토큰을 새 계정으로 덮었습니다. 기존 ksw1727 계정을 다시 쓰려면 재로그인이 필요합니다. 또 `~/.supabase/profile`이 설정 파일 없는 프로필명(`chwihap`)을 가리켜 `db query`가 `failed to read profile`로 죽길래 `profile.disabled`로 옮겨뒀습니다(되돌리려면 파일명만 복구)
