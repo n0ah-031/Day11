@@ -1,0 +1,879 @@
+#!/usr/bin/env python3
+"""F2 엑셀 취합 CLI.
+
+docs/취합기능_기술명세_v0.1.md 구현:
+  업로드(폴더 스캔) → 구조 인식 → 1단계 규칙 검증 → (파일 단위 게이팅) 2단계 AI 재검증
+  → 이상판별 출력 → 범위 선택 → 전처리(자동교정) → 합성 A/B/C/D → merged.xlsx + error_report.xlsx
+
+부서명은 파일명(확장자 제외)에서 가져온다. 부서별 회신 파일 1개 = 부서 1개 전제(§9 모드 A/B).
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import openpyxl
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils import get_column_letter
+
+# ── 시스템 기본값 (§5.4: 작성기준 스키마에 값이 없으면 이 값을 사용) ──────────────
+BLANK_ROW_TOLERANCE = 2          # §2.2 데이터 영역 중간 연속 공백 행 허용치
+TYPE_SAMPLE_ROWS = 20            # §3 값 타입 분포 샘플링 행 수
+FREEFORM_MAX_LENGTH = 500        # §5.4
+IMAGE_ALLOWED_EXT = ("jpg", "jpeg", "png")
+IMAGE_MAX_SIZE_MB = 10
+IMAGE_MIN_RESOLUTION = (200, 200)
+IMAGE_MAX_COUNT_PER_KEY = 1
+SHEET_NAME_LIMIT = 31            # 엑셀 시트명 상한 (§9 모드 A 자르기 규칙)
+
+ERROR, WARN, OK = "오류", "경고", "정상"
+GRADE_ORDER = {ERROR: 2, WARN: 1, OK: 0}   # §7 대표 등급 = 최악 등급
+
+NUM_KEYWORDS = ("날짜", "금액", "수량", "비율", "예산", "집행", "건수", "인원",
+                "date", "amount", "count", "rate", "qty", "budget", "total")
+CODE_KEYWORDS = ("부서", "성명", "이름", "코드", "직급", "구분",
+                 "dept", "department", "name", "code", "id")
+KEY_KEYWORDS = ("사번", "아이디", "코드", "id", "key", "no")
+
+# §13.2 개인정보 자동 마스킹 — 외부 API로 나가는 모든 값에 예외 없이 적용
+MASK_PATTERNS = (
+    (re.compile(r"\d{6}\s*-\s*\d{7}"), "[주민번호]"),
+    (re.compile(r"01\d[-\s]?\d{3,4}[-\s]?\d{4}"), "[전화번호]"),
+    (re.compile(r"0\d{1,2}[-\s]\d{3,4}[-\s]\d{4}"), "[전화번호]"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "[이메일]"),
+)
+
+
+def mask(value) -> str:
+    text = "" if value is None else str(value)
+    for pattern, replacement in MASK_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+# ── 데이터 모델 (§11) ──────────────────────────────────────────────────────────
+@dataclass
+class Issue:
+    file: str
+    sheet: str
+    cell: str            # 파일/시트 단위 오류는 "(해당없음)" (§2.1)
+    kind: str            # 누락 / 정합성 / 중복 / 충돌 / 소속범위 / AI 재검증 실패
+    stage: str           # 1단계 / 2단계 / 2단계(실패)
+    grade: str           # 오류 / 경고  (§6.2 내부 등급, 화면에는 노출 안 함)
+    reason: str
+    attr: str = ""
+
+    @property
+    def tag(self) -> str:
+        # §6.3 사유 텍스트에 붙는 참고용 심각도 표기
+        if self.kind == "AI 재검증 실패":
+            return "[확인필요]"
+        return "[심각]" if self.grade == ERROR else "[경미]"
+
+    def line(self) -> str:
+        return f"{self.file} - {self.sheet} - {self.cell}: {self.tag} {self.reason}"
+
+
+@dataclass
+class Fix:
+    """§8 자동교정 이력 (감사 추적용: 원본값 → 교정값)."""
+    file: str
+    sheet: str
+    cell: str
+    original: str
+    corrected: str
+    rule: str
+
+
+@dataclass
+class SheetData:
+    name: str
+    header_row: int                  # 엑셀 실제 행 번호 (1-base), 0이면 인식 실패
+    headers: list[str] = field(default_factory=list)
+    rows: list[list] = field(default_factory=list)
+    row_numbers: list[int] = field(default_factory=list)   # rows[i]의 엑셀 실제 행 번호
+    images: list[dict] = field(default_factory=list)
+    col_types: list[str] = field(default_factory=list)
+    merged: list[tuple[int, int, int, int]] = field(default_factory=list)  # (min_row, min_col, max_row, max_col)
+
+
+@dataclass
+class UploadedFile:
+    path: Path
+    dept: str
+    sheets: list[SheetData] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list)
+    fixes: list[Fix] = field(default_factory=list)
+    ai_unverified: bool = False      # §6.4 정상(AI 미검증)
+    readable: bool = True
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+    @property
+    def grade(self) -> str:
+        return max((i.grade for i in self.issues), key=lambda g: GRADE_ORDER[g], default=OK)
+
+    @property
+    def status(self) -> str:
+        # §6.1 화면 표기는 정상/이상 이진화
+        return "이상" if self.issues else "정상"
+
+
+# ── 2. 업로드 및 구조 인식 (F2-1) ─────────────────────────────────────────────
+def _is_blank(value) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _looks_like_data(row: list) -> bool:
+    """헤더 후보 다음 행이 데이터인지: 숫자/날짜가 하나라도 섞여 있으면 데이터로 본다 (§2.2)."""
+    return any(not isinstance(v, str) and not _is_blank(v) for v in row)
+
+
+def _find_header(grid: list[list]) -> int:
+    """헤더 행 인덱스(0-base)를 찾는다. 못 찾으면 -1. (§2.2 제목행 오인식 방지)"""
+    for i, row in enumerate(grid):
+        filled = [v for v in row if not _is_blank(v)]
+        if len(filled) < 2:
+            continue                      # 단일 병합 제목행 → 헤더 후보 제외
+        if not all(isinstance(v, str) for v in filled):
+            continue                      # 헤더는 순수 텍스트
+        nxt = grid[i + 1] if i + 1 < len(grid) else []
+        if not [v for v in nxt if not _is_blank(v)]:
+            continue                      # 다음 행 공백 → 후보 제외
+        if _looks_like_data(nxt):
+            return i                      # 다음 행이 숫자/날짜를 보임 → 헤더 확정
+    # 전 컬럼이 텍스트인 시트(숫자 없음)는 위 규칙으로 확정되지 않으므로,
+    # 제목행이 아닌 첫 텍스트 행을 헤더로 채택한다.
+    for i, row in enumerate(grid):
+        filled = [v for v in row if not _is_blank(v)]
+        if len(filled) >= 2 and all(isinstance(v, str) for v in filled):
+            if [v for v in (grid[i + 1] if i + 1 < len(grid) else []) if not _is_blank(v)]:
+                return i
+    return -1
+
+
+def _read_images(ws) -> list[dict]:
+    """이미지 anchor 전체 점유 범위(from~to)와 메타데이터를 파싱한다 (§2, §5.3)."""
+    out = []
+    for im in getattr(ws, "_images", []):
+        anchor = im.anchor
+        frm = getattr(anchor, "_from", None)
+        if frm is None:
+            continue
+        to = getattr(anchor, "to", None)
+        try:
+            data = im._data()
+        except Exception:
+            data = b""
+        width = height = 0
+        try:
+            from PIL import Image as PILImage
+            with PILImage.open(io.BytesIO(data)) as pim:
+                width, height = pim.size
+        except Exception:
+            width, height = int(im.width or 0), int(im.height or 0)
+        out.append({
+            "from": (frm.row + 1, frm.col + 1),                       # (row, col) 1-base
+            "to": (to.row + 1, to.col + 1) if to else (frm.row + 1, frm.col + 1),
+            "single_cell_anchor": to is None,
+            "ext": (getattr(im, "format", "") or "").lower(),
+            "bytes": len(data),
+            "data": data,
+            "sha256": hashlib.sha256(data).hexdigest() if data else "",
+            "resolution": (width, height),
+        })
+    return out
+
+
+def read_file(path: Path, include_hidden: bool = False) -> UploadedFile:
+    uf = UploadedFile(path=path, dept=path.stem)
+    if path.suffix.lower() != ".xlsx":
+        uf.readable = False
+        uf.issues.append(Issue(path.name, "(해당없음)", "(해당없음)", "정합성", "1단계", ERROR,
+                               f"지원하지 않는 파일 형식({path.suffix}). .xlsx만 업로드할 수 있습니다. "
+                               "해결방법: 엑셀에서 '다른 이름으로 저장' → 'Excel 통합 문서(*.xlsx)'로 변경 후 재시도."))
+        return uf
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception as exc:                       # 손상/암호 보호 (§2.1)
+        uf.readable = False
+        uf.issues.append(Issue(path.name, "(해당없음)", "(해당없음)", "정합성", "1단계", ERROR,
+                               f"파일을 열 수 없습니다(손상 또는 암호 보호 가능): {exc}. "
+                               "해결방법: 엑셀에서 정상적으로 열리는지, 암호가 걸려있지 않은지 확인 후 재시도."))
+        return uf
+
+    for ws in wb.worksheets:
+        if ws.sheet_state != "visible" and not include_hidden:
+            continue
+        grid = [list(r) for r in ws.iter_rows(values_only=True)]
+        images = _read_images(ws)
+        if not any(not _is_blank(v) for row in grid for v in row) and not images:
+            uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
+                                   "시트에 데이터가 없습니다. 해결방법: 빈 시트를 삭제하거나 데이터를 입력 후 재시도."))
+            continue
+        hi = _find_header(grid)
+        if hi < 0:
+            uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
+                                   "헤더(열 제목) 행을 찾을 수 없습니다. 해결방법: 제목·로고 행과 데이터 사이에 "
+                                   "명확한 열 제목 행이 있는지 확인해주세요."))
+            continue
+
+        headers = [str(v).strip() if not _is_blank(v) else "" for v in grid[hi]]
+        while headers and headers[-1] == "":
+            headers.pop()
+        rows: list[list] = []
+        row_numbers: list[int] = []
+        blank_run = 0
+        for j in range(hi + 1, len(grid)):
+            row = list(grid[j])[:len(headers)] + [None] * max(0, len(headers) - len(grid[j]))
+            if all(_is_blank(v) for v in row):
+                blank_run += 1
+                if blank_run > BLANK_ROW_TOLERANCE:
+                    break
+                continue
+            blank_run = 0
+            rows.append(row)
+            row_numbers.append(j + 1)
+        if not rows:
+            uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "누락", "1단계", ERROR,
+                                   "헤더는 있으나 입력된 데이터가 없습니다. 해결방법: 데이터를 입력 후 재시도."))
+            continue
+        merged = [(r.min_row, r.min_col, r.max_row, r.max_col) for r in ws.merged_cells.ranges]
+        uf.sheets.append(SheetData(ws.title, hi + 1, headers, rows, row_numbers, images,
+                                   merged=merged))
+    return uf
+
+
+# ── 3. 데이터 유형 분류 ───────────────────────────────────────────────────────
+def _is_number(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    return _to_number(value) is not None
+
+
+def _to_number(value):
+    """콤마·통화기호·공백을 제거하고 숫자로 변환. 실패 시 None (§5.2 경고 조건)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"[,\s₩$€%]", "", value.strip())
+    try:
+        return float(cleaned) if cleaned else None
+    except ValueError:
+        return None
+
+
+def classify_columns(sheet: SheetData, rules: dict) -> list[str]:
+    """컬럼별 유형: numeric / code_list / pattern / freeform / image (§3)."""
+    image_cols = {c for im in sheet.images for c in range(im["from"][1], im["to"][1] + 1)}
+    types = []
+    for idx, header in enumerate(sheet.headers):
+        rule = rules.get(header, {})
+        if rule.get("type"):
+            types.append(rule["type"])
+            continue
+        if (idx + 1) in image_cols:
+            types.append("image")
+            continue
+        low = header.lower()
+        hint = None
+        if any(k in low for k in NUM_KEYWORDS):
+            hint = "numeric"
+        elif any(k in low for k in CODE_KEYWORDS):
+            hint = "code_list"
+        sample = [r[idx] for r in sheet.rows[:TYPE_SAMPLE_ROWS] if not _is_blank(r[idx])]
+        if sample:
+            # 값 타입 분포가 최종 기준 (키워드 힌트보다 우선, §3).
+            # 다수결(>50%)로 판정한다 — 오류값이 일부 섞인 숫자 컬럼도 numeric으로 봐야
+            # 그 오류값을 정합성 위반으로 잡아낼 수 있다.
+            numeric_ratio = sum(_is_number(v) for v in sample) / len(sample)
+            if numeric_ratio > 0.5:
+                types.append("numeric")
+                continue
+            if hint == "numeric":
+                hint = None
+        if hint == "code_list" and rule.get("master_list"):
+            types.append("code_list")
+        elif rule.get("pattern_regex") or "이메일" in low or "email" in low:
+            types.append("pattern")
+        elif hint == "code_list":
+            types.append("code_list")
+        else:
+            types.append("freeform")          # §3 분류 불확실 시 기본값(가장 관대)
+    return types
+
+
+# ── 4.1 / 5. 1단계 규칙기반 검증 ──────────────────────────────────────────────
+EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.]+$")
+
+
+def _validate_text(value: str, ctype: str, rule: dict):
+    """(grade, reason, corrected) 반환. grade=None이면 정상 (§5.1)."""
+    if ctype == "code_list":
+        master = rule.get("master_list") or []
+        if not master:
+            return None, "", None
+        if value in master:
+            return None, "", None
+        norm = {m.strip().casefold(): m for m in master}
+        hit = norm.get(value.strip().casefold())
+        if hit:
+            return WARN, f"코드표와 공백·대소문자 차이만 존재(자동 교정 가능): '{value}' → '{hit}'", hit
+        return ERROR, f"코드표 마스터 목록에 없는 값: '{value}'", None
+    if ctype == "pattern":
+        pattern = rule.get("pattern_regex")
+        regex = re.compile(pattern) if pattern else EMAIL_RE
+        if regex.match(value):
+            return None, "", None
+        squeezed = re.sub(r"\s+", "", value)
+        if regex.match(squeezed):
+            return WARN, f"구분자·공백 차이(자동 교정 가능): '{value}' → '{squeezed}'", squeezed
+        return ERROR, f"허용 형식에 맞지 않는 값: '{value}'", None
+    # freeform
+    for banned in rule.get("banned_words") or []:
+        if banned in value:
+            return ERROR, f"금칙어 포함: '{banned}'", None
+    limit = int(rule.get("max_length") or FREEFORM_MAX_LENGTH)
+    if len(value) > limit:
+        return WARN, f"길이 초과({len(value)}자 > {limit}자, 자동 절삭 가능)", value[:limit]
+    return None, "", None
+
+
+def _validate_number(raw, rule: dict):
+    number = _to_number(raw)
+    if number is None:
+        return ERROR, f"숫자로 해석할 수 없는 값: '{raw}'", None
+    lo, hi = rule.get("min"), rule.get("max")
+    if lo is not None and number < lo:
+        return ERROR, f"허용 범위 미달({number} < {lo})", None
+    if hi is not None and number > hi:
+        return ERROR, f"허용 범위 초과({number} > {hi})", None
+    places = rule.get("decimal_places")
+    if places is not None:
+        rounded = round(number, int(places))
+        if abs(rounded - number) > 1e-12:
+            return WARN, f"소수점 자릿수 규칙 위반(자동 반올림 가능): {number} → {rounded}", rounded
+        number = rounded
+    if isinstance(raw, str):
+        return WARN, f"콤마·통화기호 제거 후 정상(자동 교정 가능): '{raw}' → {number}", number
+    return None, "", None
+
+
+def _pick_key_column(headers: list[str]) -> int:
+    for idx, header in enumerate(headers):
+        if any(k in header.lower() for k in KEY_KEYWORDS):
+            return idx
+    return 0        # ponytail: 키 컬럼 미지정 시 첫 컬럼. rules.json의 "key": true로 상시 재지정 가능
+
+
+def review_stage1(uf: UploadedFile, rules: dict) -> None:
+    """파일 내 모든 셀을 끝까지 스캔한다(첫 위반에서 중단하지 않음, §4.1)."""
+    for sheet in uf.sheets:
+        sheet.col_types = classify_columns(sheet, rules)
+        for idx, header in enumerate(sheet.headers):
+            ctype = sheet.col_types[idx]
+            if ctype == "image" or not header:
+                continue
+            rule = rules.get(header, {})
+            required = rule.get("required", True)
+            letter = get_column_letter(idx + 1)
+            for i, row in enumerate(sheet.rows):
+                cell = f"{letter}{sheet.row_numbers[i]}"
+                raw = row[idx]
+                # 누락 → 정합성 → 중복/충돌 순서. 누락이면 이후 검사 생략 (§4.1)
+                if _is_blank(raw):
+                    if required:
+                        uf.issues.append(Issue(uf.name, sheet.name, cell, "누락", "1단계", ERROR,
+                                               "필수값 누락", header))
+                    else:
+                        uf.issues.append(Issue(uf.name, sheet.name, cell, "누락", "1단계", WARN,
+                                               "비필수 항목 누락", header))
+                    continue
+                if ctype == "numeric":
+                    grade, reason, corrected = _validate_number(raw, rule)
+                else:
+                    grade, reason, corrected = _validate_text(str(raw), ctype, rule)
+                if grade:
+                    uf.issues.append(Issue(uf.name, sheet.name, cell, "정합성", "1단계", grade,
+                                           reason, header))
+                    if grade == WARN and corrected is not None:
+                        uf.fixes.append(Fix(uf.name, sheet.name, cell, str(raw), str(corrected), reason))
+
+        _review_duplicates(uf, sheet, rules)
+        _review_images(uf, sheet, rules)
+
+
+def _review_duplicates(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
+    """동일 키 그룹핑 → 그룹 내 값 비교. 완전 중복=경고, 값 상이=충돌(오류) (§5.1)."""
+    if not sheet.headers:
+        return
+    key_idx = next((i for i, h in enumerate(sheet.headers) if rules.get(h, {}).get("key")),
+                   _pick_key_column(sheet.headers))
+    letter = get_column_letter(key_idx + 1)
+    groups: dict[str, list[int]] = {}
+    for i, row in enumerate(sheet.rows):
+        key = row[key_idx]
+        if _is_blank(key):
+            continue
+        groups.setdefault(str(key).strip(), []).append(i)
+    for key, indexes in groups.items():
+        if len(indexes) < 2:
+            continue
+        first = [str(v) for v in sheet.rows[indexes[0]]]
+        for i in indexes[1:]:
+            cell = f"{letter}{sheet.row_numbers[i]}"
+            if [str(v) for v in sheet.rows[i]] == first:
+                uf.issues.append(Issue(uf.name, sheet.name, cell, "중복", "1단계", WARN,
+                                       f"키 '{key}' 완전 중복 행(자동 제거 가능)", sheet.headers[key_idx]))
+                uf.fixes.append(Fix(uf.name, sheet.name, cell, f"중복 행(키 {key})", "행 제거", "완전 중복 행 자동 제거"))
+            else:
+                uf.issues.append(Issue(uf.name, sheet.name, cell, "충돌", "1단계", ERROR,
+                                       f"키 '{key}'가 같으나 값이 상이한 행 존재", sheet.headers[key_idx]))
+
+
+def _review_images(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
+    """이미지는 1단계만 수행하고 종료 (§5.3). 내용 판단은 하지 않는다."""
+    if not sheet.images:
+        return
+    rule = next((r for h, r in rules.items() if r.get("type") == "image"), {})
+    allowed = tuple(rule.get("allowed_extensions") or IMAGE_ALLOWED_EXT)
+    max_bytes = float(rule.get("max_file_size_mb") or IMAGE_MAX_SIZE_MB) * 1024 * 1024
+    min_res = tuple(rule.get("min_resolution") or IMAGE_MIN_RESOLUTION)
+    max_count = int(rule.get("max_count_per_key") or IMAGE_MAX_COUNT_PER_KEY)
+    seen_hash: dict[str, str] = {}
+    per_row: dict[int, int] = {}
+
+    for im in sheet.images:
+        cell = f"{get_column_letter(im['from'][1])}{im['from'][0]}"
+        if im["ext"] and im["ext"] not in allowed:
+            uf.issues.append(Issue(uf.name, sheet.name, cell, "정합성", "1단계", ERROR,
+                                   f"허용되지 않는 이미지 형식: {im['ext']} (허용: {', '.join(allowed)})"))
+        if im["bytes"] > max_bytes:
+            uf.issues.append(Issue(uf.name, sheet.name, cell, "정합성", "1단계", ERROR,
+                                   f"이미지 용량 상한 초과({im['bytes'] / 1024 / 1024:.1f}MB > {max_bytes / 1024 / 1024:.0f}MB)"))
+        width, height = im["resolution"]
+        if width and (width < min_res[0] or height < min_res[1]):
+            uf.issues.append(Issue(uf.name, sheet.name, cell, "정합성", "1단계", ERROR,
+                                   f"최소 해상도 미달({width}×{height} < {min_res[0]}×{min_res[1]})"))
+        # 소속 범위 정합성: anchor 전체 범위가 병합 영역과 일치하면 정상,
+        # 병합 셀이 아니면서 2개 이상 데이터 행에 걸치면 소속 모호 → 경고 (§5.3)
+        if im["to"][0] > im["from"][0]:
+            spans_merged = any(mr[0] <= im["from"][0] and im["to"][0] <= mr[2]
+                               for mr in sheet.merged)
+            if not spans_merged:
+                uf.issues.append(Issue(uf.name, sheet.name, cell, "소속범위", "1단계", WARN,
+                                       f"이미지가 {im['from'][0]}~{im['to'][0]}행에 걸쳐 있고 병합 셀 영역과 "
+                                       "일치하지 않아 소속 레코드가 모호합니다(자동 처리 불가, 담당자 확인 권고)"))
+        if im["sha256"]:
+            if im["sha256"] in seen_hash:
+                uf.issues.append(Issue(uf.name, sheet.name, cell, "중복", "1단계", WARN,
+                                       f"동일 이미지 파일 재사용({seen_hash[im['sha256']]}와 해시 일치, 담당자 확인 권고)"))
+            else:
+                seen_hash[im["sha256"]] = cell
+        per_row[im["from"][0]] = per_row.get(im["from"][0], 0) + 1
+
+    for row, count in per_row.items():
+        if count > max_count:
+            uf.issues.append(Issue(uf.name, sheet.name, f"{row}행", "충돌", "1단계", ERROR,
+                                   f"허용 이미지 개수 정책 위반({count}장 > {max_count}장)"))
+
+
+# ── 4.2 2단계 AI(LLM) 재검증 ─────────────────────────────────────────────────
+AI_SYSTEM_PROMPT = (
+    "당신은 공공기관 실적자료 검토 담당자입니다. 각 항목의 '작성기준'과 '값'을 보고 값이 기준에 "
+    "부합하는지 판정하세요. 형식 오류는 이미 별도 규칙으로 검증되었으므로, 문맥상 부적합(질문과 "
+    "무관한 서술, 문맥상 맞지 않는 분류, 다른 행 대비 비합리적인 수치)만 '부적합'으로 판정합니다. "
+    '반드시 {"results":[{"id":"...","verdict":"적합"|"부적합","reason":"..."}]} 형태의 JSON만 출력하세요.'
+)
+
+
+def _ai_items(uf: UploadedFile) -> list[dict]:
+    """AI 재검증 대상 항목 생성. 전송되는 모든 값에 마스킹 적용 (§13.2)."""
+    items = []
+    for sheet in uf.sheets:
+        for idx, header in enumerate(sheet.headers):
+            ctype = sheet.col_types[idx] if idx < len(sheet.col_types) else "freeform"
+            if ctype == "image" or not header:
+                continue
+            letter = get_column_letter(idx + 1)
+            stats = ""
+            if ctype == "numeric":
+                numbers = [n for n in (_to_number(r[idx]) for r in sheet.rows) if n is not None]
+                if numbers:
+                    mean = sum(numbers) / len(numbers)
+                    stats = (f"같은 컬럼 분포: 건수 {len(numbers)}, 평균 {mean:.1f}, "
+                             f"최소 {min(numbers)}, 최대 {max(numbers)}")
+            for i, row in enumerate(sheet.rows):
+                if _is_blank(row[idx]):
+                    continue
+                item = {
+                    "id": f"{sheet.name}!{letter}{sheet.row_numbers[i]}",
+                    "sheet": sheet.name,
+                    "cell": f"{letter}{sheet.row_numbers[i]}",
+                    "작성기준": header,
+                    "값": mask(row[idx]),
+                }
+                if ctype == "numeric" and stats:
+                    item["컬럼분포"] = stats
+                elif ctype in ("code_list", "freeform"):
+                    # 인접 컬럼 컨텍스트 (패턴 기반은 값 자체로 판정 가능하므로 제외, §4.2)
+                    item["같은행참고"] = {
+                        h: mask(row[k]) for k, h in enumerate(sheet.headers)
+                        if k != idx and h and not _is_blank(row[k])
+                    }
+                    if ctype == "freeform":
+                        text = str(row[idx])
+                        item["특징추출"] = {
+                            "길이": len(text),
+                            "헤더키워드포함": any(t and t in text for t in re.split(r"[\s·/]", header)),
+                        }
+                items.append(item)
+    return items
+
+
+def _ai_call(client, model: str, items: list[dict]) -> dict[str, dict]:
+    payload = [{k: v for k, v in it.items() if k not in ("sheet", "cell")} for it in items]
+    response = client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": AI_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+    )
+    parsed = json.loads(response.choices[0].message.content)
+    return {str(r.get("id")): r for r in parsed.get("results", []) if r.get("id")}
+
+
+def review_stage2(uf: UploadedFile, model: str, batch_size: int = 100) -> None:
+    """파일 전체가 1단계를 통과한 경우에만 호출된다(파일 단위 게이팅, §4.2)."""
+    items = _ai_items(uf)
+    if not items:
+        return
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+    except Exception as exc:                       # §13.3 서비스 전체 이용 불가 → 폴백
+        uf.ai_unverified = True
+        print(f"  · AI 재검증 생략(서비스 이용 불가: {exc}) → 정상(AI 미검증)", file=sys.stderr)
+        return
+
+    verdicts: dict[str, dict] = {}
+    for start in range(0, len(items), batch_size):
+        batch = items[start:start + batch_size]
+        try:
+            verdicts.update(_ai_call(client, model, batch))
+        except Exception as exc:                   # §13.3 서비스 전체 장애·타임아웃 → 2단계 생략
+            uf.ai_unverified = True
+            print(f"  · AI 재검증 생략(서비스 장애: {exc}) → 정상(AI 미검증)", file=sys.stderr)
+            return
+
+    missing = [it for it in items if it["id"] not in verdicts]
+    if missing:
+        # ponytail: 실패 항목만 1회 재시도(개별 호출 대신 한 번에 묶어서). 개별 호출이 필요할 만큼
+        # 정확도 문제가 드러나면 항목별 루프로 전환.
+        try:
+            verdicts.update(_ai_call(client, model, missing))
+        except Exception:
+            pass
+
+    for it in items:
+        result = verdicts.get(it["id"])
+        if not result or result.get("verdict") not in ("적합", "부적합"):
+            # §4.2.1 서비스는 정상이나 개별 항목 판정 불가 → 이상(AI 재검증 실패), 오류 등급
+            uf.issues.append(Issue(uf.name, it["sheet"], it["cell"], "AI 재검증 실패", "2단계(실패)", ERROR,
+                                   "AI 재검증 실패 — 사유: AI 응답을 해석할 수 없어 최종 판정을 내리지 못했습니다."
+                                   "(1단계 규칙기반 검증은 통과했으나, 2단계에서 예상된 '적합/부적합' 형식이 아닌 "
+                                   "응답을 받아 처리가 중단되었습니다.) 담당자가 직접 값을 확인해주세요.",
+                                   it["작성기준"]))
+        elif result["verdict"] == "부적합":
+            # §6.2 LLM 판단은 확정적이지 않으므로 경고 등급. 자동교정 대상에서 제외(§8)
+            uf.issues.append(Issue(uf.name, it["sheet"], it["cell"], "정합성", "2단계", WARN,
+                                   f"AI 재검증 부적합: {result.get('reason', '(사유 없음)')}", it["작성기준"]))
+
+
+# ── 8. 전처리 ────────────────────────────────────────────────────────────────
+def preprocess(uf: UploadedFile) -> None:
+    """1단계 경고 항목에 자동 교정을 적용한다. 원본값은 Fix에 보존 (§8 감사 추적).
+
+    2단계(AI) 판정은 자동 교정하지 않는다. 이미지도 변환하지 않는다.
+    """
+    by_cell = {(f.sheet, f.cell): f for f in uf.fixes if f.corrected != "행 제거"}
+    drop = {(f.sheet, int(re.sub(r"\D", "", f.cell) or 0))
+            for f in uf.fixes if f.corrected == "행 제거"}
+    for sheet in uf.sheets:
+        keep_rows, keep_numbers = [], []
+        for i, row in enumerate(sheet.rows):
+            row_number = sheet.row_numbers[i]
+            if (sheet.name, row_number) in drop:
+                continue
+            new_row = list(row)
+            for idx in range(len(new_row)):
+                fix = by_cell.get((sheet.name, f"{get_column_letter(idx + 1)}{row_number}"))
+                if fix:
+                    number = _to_number(fix.corrected)
+                    new_row[idx] = number if number is not None and _is_number(row[idx]) else fix.corrected
+            keep_rows.append(new_row)
+            keep_numbers.append(row_number)
+        sheet.rows, sheet.row_numbers = keep_rows, keep_numbers
+
+
+# ── 9. 합성 (F2-6~F2-10) ─────────────────────────────────────────────────────
+def _safe_sheet_name(name: str, used: set[str]) -> str:
+    base = re.sub(r"[\[\]:*?/\\]", "_", name)[:SHEET_NAME_LIMIT]
+    candidate, n = base, 1
+    while candidate in used:
+        suffix = f"~{n}"
+        candidate = base[:SHEET_NAME_LIMIT - len(suffix)] + suffix
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
+def _add_images(ws, sheet: SheetData, row_offset: int) -> None:
+    """anchor 크기는 유지하고 위치만 행 오프셋만큼 이동 (§9 재배치 규칙)."""
+    for im in sheet.images:
+        if not im["data"]:
+            continue
+        try:
+            picture = XLImage(io.BytesIO(im["data"]))
+        except Exception:
+            continue
+        row = im["from"][0] + row_offset
+        ws.add_image(picture, f"{get_column_letter(im['from'][1])}{row}")
+
+
+def _write_block(ws, headers: list[str], rows: list[list], start_row: int) -> int:
+    if start_row == 1:
+        for c, header in enumerate(headers, start=1):
+            ws.cell(row=1, column=c, value=header)
+        start_row = 2
+    for row in rows:
+        for c, value in enumerate(row, start=1):
+            ws.cell(row=start_row, column=c, value=value)
+        start_row += 1
+    return start_row
+
+
+def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_cols: list[str]):
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    used: set[str] = set()
+    notes: list[str] = []
+
+    if mode == "A":
+        # 원본 보존형: {부서명}_{원본시트명} 시트 n×m개
+        for uf in files:
+            for sheet in uf.sheets:
+                ws = wb.create_sheet(_safe_sheet_name(f"{uf.dept}_{sheet.name}", used))
+                _write_block(ws, sheet.headers, sheet.rows, 1)
+                _add_images(ws, sheet, row_offset=0)         # 모드 A는 anchor 이동 없음
+        return wb, notes
+
+    # B/C/D 공통: 세로 누적. C는 그룹 단위, B/D는 시트명 단위.
+    buckets: dict[str, list[tuple[UploadedFile, SheetData]]] = {}
+    for uf in files:
+        for sheet in uf.sheets:
+            if mode == "C":
+                key = group_map.get(sheet.name)
+                if key is None:
+                    key = "미분류"
+                    notes.append(f"'{sheet.name}' 시트는 그룹 매핑에 없어 '미분류' 그룹으로 편입했습니다.")
+            else:
+                key = sheet.name
+            buckets.setdefault(key, []).append((uf, sheet))
+
+    extra = ["구분", "부서"] if mode == "C" else ["부서"]
+    dept_rows: dict[str, dict[str, tuple[int, int]]] = {}   # sheet → dept → (첫행, 마지막행)
+
+    for key, entries in buckets.items():
+        base_headers = entries[0][1].headers
+        title = _safe_sheet_name(key, used)
+        ws = wb.create_sheet(title)
+        err_ws = None
+        cursor = _write_block(ws, extra + base_headers, [], 1)
+        for uf, sheet in entries:
+            if sheet.headers != base_headers:
+                # §9 모드 B 예외: 부서 간 헤더 불일치 → 오류 시트로 분리
+                if err_ws is None:
+                    err_ws = wb.create_sheet(_safe_sheet_name(f"{key}_헤더불일치", used))
+                    _write_block(err_ws, ["부서", "시트"] + sheet.headers, [], 1)
+                notes.append(f"'{uf.dept}'의 '{sheet.name}' 시트 헤더가 기준과 달라 '{err_ws.title}' 시트로 분리했습니다.")
+                rows = [[uf.dept, sheet.name] + list(r) for r in sheet.rows]
+                _write_block(err_ws, [], rows, err_ws.max_row + 1)
+                continue
+            prefix = [sheet.name, uf.dept] if mode == "C" else [uf.dept]
+            rows = [prefix + list(r) for r in sheet.rows]
+            first = cursor
+            cursor = _write_block(ws, [], rows, cursor)
+            if rows:
+                dept_rows.setdefault(title, {})[uf.dept] = (first, cursor - 1)
+            _add_images(ws, sheet, row_offset=first - sheet.row_numbers[0] if sheet.row_numbers else 0)
+
+    if mode == "D":
+        _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes)
+    return wb, notes
+
+
+def _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes) -> None:
+    """종합요약 시트를 최상단에 추가. 수치는 SUMIF 수식 기반(하드코딩 금지, §9)."""
+    ws = wb.create_sheet("종합요약", 0)
+    ws.cell(row=1, column=1, value="부서")
+    for c, col in enumerate(summary_cols, start=2):
+        ws.cell(row=1, column=c, value=col)
+    depts = sorted({uf.dept for uf in files})
+    for r, dept in enumerate(depts, start=2):
+        ws.cell(row=r, column=1, value=dept)
+        for c, col in enumerate(summary_cols, start=2):
+            terms = []
+            for title, ranges in dept_rows.items():
+                target = wb[title]
+                headers = [target.cell(row=1, column=i).value for i in range(1, target.max_column + 1)]
+                if col not in headers or dept not in ranges:
+                    continue
+                value_letter = get_column_letter(headers.index(col) + 1)
+                dept_letter = get_column_letter(headers.index("부서") + 1)
+                lo, hi = ranges[dept]
+                terms.append(f"SUMIF('{title}'!{dept_letter}{lo}:{dept_letter}{hi},"
+                             f"$A{r},'{title}'!{value_letter}{lo}:{value_letter}{hi})")
+            if terms:
+                ws.cell(row=r, column=c, value="=" + "+".join(terms))
+            else:
+                ws.cell(row=r, column=c, value="N/A")     # §9 지정 컬럼 부재 시
+                notes.append(f"요약 지표 '{col}'을(를) 찾을 수 없어 '{dept}' 행에 N/A로 표기했습니다.")
+
+
+# ── 10.2 오류 리포트 ─────────────────────────────────────────────────────────
+def write_report(files: list[UploadedFile], path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "오류 목록"
+    ws.append(["파일명", "시트", "셀 위치", "오류 유형", "검증 단계", "사유", "작성 기준"])
+    for uf in files:
+        for issue in uf.issues:
+            ws.append([issue.file, issue.sheet, issue.cell, issue.kind, issue.stage,
+                       f"{issue.tag} {issue.reason}", issue.attr])
+    ws2 = wb.create_sheet("자동교정 이력")
+    ws2.append(["파일명", "시트", "셀 위치", "원본값", "교정값", "적용 규칙"])
+    for uf in files:
+        for fix in uf.fixes:
+            ws2.append([fix.file, fix.sheet, fix.cell, fix.original, fix.corrected, fix.rule])
+    wb.save(path)
+
+
+# ── 6/7. 이상판별 출력 및 범위 선택 ───────────────────────────────────────────
+def print_review(files: list[UploadedFile]) -> None:
+    print("\n=== 이상판별 결과 ===")
+    for uf in files:
+        status = uf.status
+        if status == "정상" and uf.ai_unverified:
+            status = "정상(AI 미검증)"
+        print(f"[{status}] {uf.name}")
+        for issue in uf.issues:
+            print(f"    {issue.line()}")
+
+
+def load_env(path: Path = Path(".env")) -> None:
+    """.env의 KEY=VALUE를 환경변수로 올린다 (§13.1: 키는 코드에 하드코딩 금지).
+
+    이미 설정된 환경변수는 덮어쓰지 않는다(셸에서 export한 값이 우선).
+    """
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+def main(argv=None) -> int:
+    load_env()
+    parser = argparse.ArgumentParser(description="엑셀 취합 (F2)")
+    parser.add_argument("input_dir", help="취합할 .xlsx 파일이 있는 폴더")
+    parser.add_argument("--mode", choices=list("ABCD"), default="B", help="합성 모드 (기본 B)")
+    parser.add_argument("--out", default="merged.xlsx", help="취합 결과 파일 경로")
+    parser.add_argument("--report", default="error_report.xlsx", help="오류 리포트 파일 경로")
+    parser.add_argument("--rules", help="작성기준 JSON (§5.4). 없으면 시스템 기본값")
+    parser.add_argument("--group-map", help="모드 C 그룹 매핑 JSON {시트명: 그룹명}")
+    parser.add_argument("--summary-cols", default="", help="모드 D 요약 지표 컬럼(콤마 구분)")
+    parser.add_argument("--include-anomalous", action="store_true",
+                        help="오류 등급 파일도 강제로 취합에 포함 (§7)")
+    parser.add_argument("--no-ai", action="store_true", help="2단계 AI 재검증 생략")
+    parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-5-mini"))
+    parser.add_argument("--include-hidden", action="store_true", help="숨김 시트 포함")
+    args = parser.parse_args(argv)
+
+    rules = json.loads(Path(args.rules).read_text(encoding="utf-8")) if args.rules else {}
+    group_map = json.loads(Path(args.group_map).read_text(encoding="utf-8")) if args.group_map else {}
+    summary_cols = [c.strip() for c in args.summary_cols.split(",") if c.strip()]
+
+    paths = sorted(p for p in Path(args.input_dir).iterdir()
+                   if p.is_file() and not p.name.startswith("~$"))
+    if not paths:
+        print(f"'{args.input_dir}'에 파일이 없습니다.", file=sys.stderr)
+        return 1
+
+    files = []
+    for path in paths:
+        print(f"· {path.name} 검토 중")
+        uf = read_file(path, args.include_hidden)
+        if uf.readable:
+            review_stage1(uf, rules)
+            # 파일 단위 게이팅: 1단계 위반이 하나라도 있으면 2단계로 진입하지 않는다 (§4.2)
+            if not uf.issues and not args.no_ai:
+                review_stage2(uf, args.model)
+            elif uf.issues:
+                print("  · 1단계 위반 발견 → 2단계 AI 재검증 미진입(API 호출 절약)")
+        files.append(uf)
+
+    print_review(files)
+
+    selected = [uf for uf in files if uf.readable and uf.sheets
+                and (uf.grade != ERROR or args.include_anomalous)]
+    forced = [uf for uf in selected if uf.grade == ERROR]
+    print(f"\n취합 대상: {len(selected)}/{len(files)}건")
+    if not selected:
+        write_report(files, Path(args.report))
+        print(f"취합 가능한 파일이 없습니다. 오류 리포트: {args.report}")
+        return 2
+
+    for uf in selected:
+        preprocess(uf)
+
+    wb, notes = synthesize(selected, args.mode, group_map, summary_cols)
+    wb.save(args.out)
+    write_report(files, Path(args.report))
+
+    print(f"\n결과: {args.out} (시트 {len(wb.sheetnames)}개)")
+    print(f"오류 리포트: {args.report}")
+    if forced:
+        # §10.1 특이사항 안내 — 다운로드를 막지 않는다
+        print("\n[특이사항] 강제로 포함한 항목 중 형식 오류가 있어 결과 파일의 일부 값·수식이 "
+              "정상 계산되지 않았을 수 있습니다(예: #VALUE!). 아래를 확인 후 원본을 수정해주세요.")
+        for uf in forced:
+            for issue in (i for i in uf.issues if i.grade == ERROR):
+                print(f"    {issue.line()}")
+    for note in dict.fromkeys(notes):
+        print(f"[안내] {note}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
