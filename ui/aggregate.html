@@ -177,7 +177,9 @@
 <div class="flex items-center gap-4">
 <nav class="hidden md:flex items-center gap-8">
 <a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="#">이력</a>
-<a id="nav-admin" class="hidden text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="#">관리자 콘솔</a>
+<!-- 관리자 콘솔(F4-3)은 미착수라 링크를 걸지 않는다. 권한만 배지로 알린다 -->
+<span id="nav-admin" class="hidden px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-label-sm font-label-sm text-primary"
+      title="관리자 콘솔 화면은 아직 준비되지 않았습니다">관리자</span>
 <span id="nav-user" class="hidden text-body-sm font-body-sm text-on-surface-variant"></span>
 <button id="nav-logout" class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
 </nav>
