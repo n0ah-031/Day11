@@ -33,6 +33,10 @@ BROKEN = [["사번", "부서", "예산액"], ["B1", "총무부", None]]      # �
 REPEATED = [["부서", "성명", "예산액"],
             ["기획부", "김하나", 100],
             ["기획부", "이두리", 200]]
+# 비고는 실무에서 대개 비워둔다 → 지정이 없으면 전 행이 필수값 누락으로 잡힌다
+WITH_BLANK_NOTE = [["사번", "부서", "예산액", "비고"],
+                   ["A1", "기획부", 100, None],
+                   ["A2", "기획부", 200, None]]
 
 
 def upload(sid: str, items: list[tuple[str, bytes]]):
@@ -119,9 +123,36 @@ def test_key_column():
     print("  ✓ key_col 지정으로 키 충돌 오탐 해소")
 
 
+def test_optional_columns():
+    """비고처럼 비워두는 칸 때문에 파일 전체가 '이상'이 되지 않아야 한다."""
+    sid = new_session()
+    res = upload(sid, [("기획부.xlsx", book_bytes(WITH_BLANK_NOTE))])
+    assert res.status_code == 200, res.text
+
+    # 지정 없이는 엔진 기본값(전 컬럼 필수) → 빈 비고가 필수값 누락으로 잡힌다
+    data = client.post(f"/api/session/{sid}/review", json={"no_ai": True}).json()["files"][0]
+    assert data["status"] == "이상", data
+    assert any("누락" in i["message"] and i["column"] == "비고" for i in data["issues"]), data["issues"]
+    assert data["default_checked"] is False, "오류 등급이라 기본 해제돼야 한다"
+
+    # 비고를 선택 입력으로 지정하면 정상으로 돌아오고 취합 대상에 포함된다
+    data = client.post(f"/api/session/{sid}/review",
+                       json={"no_ai": True, "optional_cols": ["비고"]}).json()["files"][0]
+    assert data["status"] == "정상", data
+    assert data["default_checked"] is True, data
+    # 다른 컬럼의 진짜 누락까지 덮어버리면 안 된다
+    sid2 = new_session()
+    upload(sid2, [("총무부.xlsx", book_bytes(BROKEN))])
+    data = client.post(f"/api/session/{sid2}/review",
+                       json={"no_ai": True, "optional_cols": ["비고"]}).json()["files"][0]
+    assert data["status"] == "이상", data
+    print("  ✓ optional_cols 지정으로 선택 기재 칸 오탐 해소")
+
+
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
-    for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column):
+    for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
+               test_optional_columns):
         fn()
     print("\n전체 통과")
     return 0

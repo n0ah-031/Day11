@@ -88,9 +88,12 @@ def review(sid: str, body: dict = Body(default={})) -> dict:
     session = _session(sid)
     no_ai = bool((body or {}).get("no_ai"))
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-    # 키 컬럼을 사용자가 고르면 엔진의 rules 경로로 넘긴다. 비우면 엔진 자동 추정
+    # 키 컬럼·선택 입력 컬럼을 사용자가 고르면 엔진의 rules 경로로 넘긴다
     key_col = (body or {}).get("key_col")
-    rules = {key_col: {"key": True}} if key_col else {}
+    rules: dict = {key_col: {"key": True}} if key_col else {}
+    # 비고·특이사항처럼 비워둘 수 있는 칸. 지정이 없으면 엔진 기본값(전 컬럼 필수)
+    for col in (body or {}).get("optional_cols") or []:
+        rules.setdefault(col, {})["required"] = False
     # 재검토 시 이슈가 누적되지 않도록 원본에서 다시 읽는다
     session["files"] = [ag.read_file(uf.path) for uf in session["files"]]
 

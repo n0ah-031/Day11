@@ -407,12 +407,12 @@ def review_stage1(uf: UploadedFile, rules: dict) -> None:
                 raw = row[idx]
                 # 누락 → 정합성 → 중복/충돌 순서. 누락이면 이후 검사 생략 (§4.1)
                 if _is_blank(raw):
+                    # 작성기준이 선택 입력으로 정한 칸은 비어 있는 것이 정상이므로
+                    # 보고하지 않는다. 담당자가 조치할 것이 없고, 비고처럼 대개
+                    # 비워두는 컬럼에서는 행 수만큼 알림이 쌓여 리포트를 덮는다.
                     if required:
                         uf.issues.append(Issue(uf.name, sheet.name, cell, "누락", "1단계", ERROR,
                                                "필수값 누락", header))
-                    else:
-                        uf.issues.append(Issue(uf.name, sheet.name, cell, "누락", "1단계", WARN,
-                                               "비필수 항목 누락", header))
                     continue
                 if ctype == "numeric":
                     grade, reason, corrected = _validate_number(raw, rule)

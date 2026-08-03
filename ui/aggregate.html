@@ -256,6 +256,10 @@
         class="rounded-lg bg-surface border border-outline-variant text-body-sm font-body-sm text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
 </select>
 <p class="text-body-sm font-body-sm text-on-surface-variant">부서명처럼 행마다 반복되는 컬럼이 키가 되면 중복·충돌 오류가 잘못 뜹니다. 행마다 고유한 컬럼을 고르세요.</p>
+
+<label class="mt-4 text-body-md font-body-md font-semibold text-on-surface">선택 입력 컬럼</label>
+<div id="optional-cols" class="flex flex-wrap gap-2"></div>
+<p class="text-body-sm font-body-sm text-on-surface-variant">비고·특이사항처럼 비워둘 수 있는 칸을 고르세요. 고르지 않으면 모든 칸을 필수로 보고, 빈 칸이 하나라도 있으면 그 파일 전체가 '이상'으로 분류돼 취합에서 기본 제외됩니다.</p>
 </div>
 
 <div class="mt-md flex flex-wrap items-center justify-between gap-4">
@@ -380,6 +384,7 @@ AI 검증 없이 빠르게 검토
     step: 1,
     files: [],          // 1단계 응답
     keyCol: '',         // 키 컬럼(빈 값이면 엔진 자동)
+    optionalCols: new Set(),   // 비워둬도 되는 컬럼(빈 집합이면 엔진 기본값=전 컬럼 필수)
     review: null,       // 2단계 응답
     included: new Set(),
     mode: 'A',
@@ -509,6 +514,22 @@ AI 검증 없이 빠르게 검토
     $('key-col-panel').classList.toggle('hidden', !heads.length);
     $('key-col').innerHTML = '<option value="">자동 (첫 컬럼 또는 사번·코드 등 키워드)</option>'
       + heads.map((h) => `<option value="${esc(h)}"${state.keyCol === h ? ' selected' : ''}>${esc(h)}</option>`).join('');
+
+    // 업로드가 바뀌어 사라진 헤더는 선택에서 뺀다
+    state.optionalCols = new Set([...state.optionalCols].filter((c) => heads.includes(c)));
+    $('optional-cols').innerHTML = heads.map((h) => {
+      const on = state.optionalCols.has(h);
+      return `<button data-col="${esc(h)}" class="px-5 py-3 rounded-full border text-body-sm font-medium transition-all ${
+        on ? 'bg-primary text-on-primary border-primary shadow-soft'
+           : 'bg-surface text-on-surface-variant border-outline-variant hover:border-primary/40 hover:text-primary'}">${esc(h)}</button>`;
+    }).join('') || '<p class="text-body-sm font-body-sm text-on-surface-variant">선택 가능한 컬럼이 없습니다.</p>';
+    $('optional-cols').querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => {
+        const c = b.dataset.col;
+        state.optionalCols.has(c) ? state.optionalCols.delete(c) : state.optionalCols.add(c);
+        renderKeyCol();
+      });
+    });
   }
 
   $('key-col').addEventListener('change', () => { state.keyCol = $('key-col').value; });
@@ -520,7 +541,8 @@ AI 검증 없이 빠르게 검토
       state.review = await api(`/api/session/${state.sid}/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ no_ai: $('no-ai').checked, key_col: state.keyCol || null })
+        body: JSON.stringify({ no_ai: $('no-ai').checked, key_col: state.keyCol || null,
+                               optional_cols: [...state.optionalCols] })
       });
       state.included = new Set(state.review.files.filter((f) => f.default_checked).map((f) => f.fid));
       renderReview();
