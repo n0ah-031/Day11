@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>취합 (Chwi-hap) - 로그인</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+
+<!-- 저장된 테마를 페인트 전에 적용 (전환 시 흰 화면 깜빡임 방지) -->
+<script>
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem('theme'); } catch (e) {}
+    var dark = saved ? saved === 'dark'
+                     : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.classList.toggle('dark', dark);
+  })();
+</script>
+
+<script id="tailwind-config">
+  // 색상은 채널값 CSS 변수를 참조한다. rgb(var(--x) / <alpha-value>) 형태여야
+  // bg-primary/20 같은 투명도 유틸리티가 라이트·다크 양쪽에서 동작한다.
+  const token = (name) => `rgb(var(${name}) / <alpha-value>)`;
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "primary": token("--primary"),
+          "primary-container": token("--primary-container"),
+          "on-primary": token("--on-primary"),
+          "secondary": token("--secondary"),
+          "secondary-container": token("--secondary-container"),
+          "tertiary": token("--tertiary"),
+          "tertiary-container": token("--tertiary-container"),
+          "background": token("--background"),
+          "surface": token("--surface"),
+          "surface-variant": token("--surface-variant"),
+          "surface-container": token("--surface-container"),
+          "surface-container-low": token("--surface-container-low"),
+          "surface-container-high": token("--surface-container-high"),
+          "surface-container-highest": token("--surface-container-highest"),
+          "on-surface": token("--on-surface"),
+          "on-surface-variant": token("--on-surface-variant"),
+          "outline": token("--outline"),
+          "outline-variant": token("--outline-variant"),
+          "error": token("--error")
+        },
+        borderRadius: {
+          "DEFAULT": "var(--radius)",
+          "lg": "var(--radius-lg)",
+          "xl": "var(--radius-xl)",
+          "full": "9999px"
+        },
+        spacing: {
+          "lg": "40px", "gutter": "24px", "base": "4px", "md": "24px",
+          "container-max": "1200px", "xl": "64px", "sm": "16px", "xs": "8px"
+        },
+        fontFamily: {
+          "headline-xl": ["Noto Sans"], "headline-lg": ["Noto Sans"], "headline-md": ["Noto Sans"],
+          "body-lg": ["Noto Sans"], "body-md": ["Noto Sans"], "body-sm": ["Noto Sans"],
+          "label-md": ["Noto Sans"], "label-sm": ["Noto Sans"]
+        },
+        fontSize: {
+          "headline-xl": ["36px", {"lineHeight": "44px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+          "headline-lg": ["28px", {"lineHeight": "36px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+          "headline-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+          "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+          "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+          "body-sm": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+          "label-md": ["14px", {"lineHeight": "16px", "fontWeight": "500"}],
+          "label-sm": ["12px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600"}]
+        },
+        boxShadow: {
+          "soft": "var(--shadow-soft)",
+          "soft-hover": "var(--shadow-soft-hover)"
+        }
+      }
+    }
+  };
+</script>
+
+<style>
+  /* 라이트 — stitch_ (1): Soft Lavender / 둥근 코너 / 부드러운 그림자 */
+  :root {
+    --primary: 138 132 255;
+    --primary-container: 230 228 255;
+    --on-primary: 255 255 255;
+    --secondary: 127 199 189;
+    --secondary-container: 214 242 238;
+    --tertiary: 255 179 138;
+    --tertiary-container: 255 234 214;
+    --background: 253 251 255;
+    --surface: 255 255 255;
+    --surface-variant: 245 243 255;
+    --surface-container: 245 243 255;
+    --surface-container-low: 250 249 255;
+    --surface-container-high: 240 238 255;
+    --surface-container-highest: 235 232 255;
+    --on-surface: 45 45 58;
+    --on-surface-variant: 91 91 110;
+    --outline: 209 209 224;
+    --outline-variant: 235 235 245;
+    --error: 255 138 138;
+
+    --radius: 1rem;
+    --radius-lg: 1.25rem;
+    --radius-xl: 2rem;
+    --shadow-soft: 0 8px 30px rgb(138 132 255 / 0.08);
+    --shadow-soft-hover: 0 12px 40px rgb(138 132 255 / 0.12);
+    --glass-bg: 255 255 255 / 0.7;
+    --glass-border: 255 255 255 / 0.8;
+    --blob-opacity: 0.05;
+  }
+
+  /* 다크 — stitch_ (2): Vibrant Indigo / 각진 코너 / 글로우 */
+  .dark {
+    --primary: 79 70 229;
+    --primary-container: 55 48 163;
+    --on-primary: 255 255 255;
+    --secondary: 129 140 248;
+    --secondary-container: 49 46 129;
+    --tertiary: 192 132 252;
+    --tertiary-container: 88 28 135;
+    --background: 2 6 23;
+    --surface: 15 23 42;
+    --surface-variant: 30 41 59;
+    --surface-container: 30 41 59;
+    --surface-container-low: 15 23 42;
+    --surface-container-high: 51 65 85;
+    --surface-container-highest: 71 85 105;
+    --on-surface: 241 245 249;
+    --on-surface-variant: 148 163 184;
+    --outline: 51 65 85;
+    --outline-variant: 30 41 59;
+    --error: 239 68 68;
+
+    --radius: 0.375rem;
+    --radius-lg: 0.75rem;
+    --radius-xl: 1rem;
+    --shadow-soft: 0 0 15px rgb(79 70 229 / 0.1);
+    --shadow-soft-hover: 0 0 20px rgb(79 70 229 / 0.2);
+    --glass-bg: 15 23 42 / 0.6;
+    --glass-border: 51 65 85 / 0.5;
+    --blob-opacity: 0.12;
+  }
+
+  body {
+    font-family: 'Noto Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+  .glass-card {
+    background: rgb(var(--glass-bg));
+    backdrop-filter: blur(12px);
+    border: 1px solid rgb(var(--glass-border));
+  }
+  /* 다크 모드에서만 입력창에 글로우를 얹는다 (라이트는 soft shadow 유지) */
+  .dark .glow-border { box-shadow: 0 0 15px rgb(var(--primary) / 0.1); }
+  .dark .glow-border:focus-within {
+    border-color: rgb(var(--primary) / 0.8);
+    box-shadow: 0 0 20px rgb(var(--primary) / 0.2);
+  }
+  .blob { opacity: var(--blob-opacity); }
+</style>
+</head>
+
+<body class="bg-background text-on-surface">
+<div class="min-h-screen flex items-center justify-center px-6 py-12 relative overflow-hidden">
+
+<!-- 배경 블롭: aggregate.html과 동일한 장식 -->
+<div class="blob absolute -top-32 -left-32 w-96 h-96 rounded-full bg-primary/30 blur-3xl pointer-events-none"></div>
+<div class="blob absolute -bottom-40 -right-24 w-[28rem] h-[28rem] rounded-full bg-tertiary/30 blur-3xl pointer-events-none"></div>
+
+<div class="w-full max-w-md relative">
+
+<div class="flex items-center justify-between mb-8">
+<h1 class="text-display-sm font-display-sm font-bold text-primary">취합</h1>
+<button id="theme-toggle" aria-label="테마 전환"
+        class="p-2 rounded-lg text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined">dark_mode</span>
+</button>
+</div>
+
+<div class="rounded-xl glass-card shadow-soft p-8">
+
+<!-- 로그인 / 회원가입 탭 (design.md 화면 1) -->
+<div role="tablist" class="flex gap-2 mb-6 p-1 rounded-xl bg-surface-variant/60">
+<button id="tab-login" role="tab" aria-selected="true"
+        class="flex-1 px-4 py-3 rounded-lg text-label-md font-label-md font-semibold transition-all">로그인</button>
+<button id="tab-signup" role="tab" aria-selected="false"
+        class="flex-1 px-4 py-3 rounded-lg text-label-md font-label-md font-semibold transition-all">회원가입</button>
+</div>
+
+<form id="form" class="flex flex-col gap-4" novalidate>
+
+<label class="flex flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">사번</span>
+<input id="employee-no" name="employee_no" autocomplete="username" required
+       class="rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</label>
+
+<label class="flex flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">비밀번호</span>
+<input id="password" name="password" type="password" autocomplete="current-password" required
+       class="rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</label>
+
+<!-- 회원가입 탭에서만 나타난다 -->
+<label id="wrap-password2" class="hidden flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">비밀번호 확인</span>
+<input id="password2" type="password" autocomplete="new-password"
+       class="rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</label>
+
+<label id="wrap-reset-email" class="hidden flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">비밀번호 재설정용 이메일</span>
+<input id="reset-email" type="email" autocomplete="email"
+       class="rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+<span class="text-body-sm font-body-sm text-on-surface-variant">사번으로 로그인하므로, 비밀번호를 잊었을 때 연락받을 이메일을 따로 받습니다.</span>
+</label>
+
+<div id="error" class="hidden rounded-xl border border-error/40 bg-error/10 px-4 py-3 text-body-sm font-body-sm text-on-surface"></div>
+<div id="notice" class="hidden rounded-xl border border-primary/40 bg-primary/10 px-4 py-3 text-body-sm font-body-sm text-on-surface"></div>
+
+<button id="submit" type="submit"
+        class="mt-2 px-6 py-4 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold shadow-lg shadow-primary/20 hover:opacity-90 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+로그인
+</button>
+
+<button id="forgot" type="button"
+        class="text-body-sm font-body-sm text-on-surface-variant hover:text-primary transition-colors">
+비밀번호를 잊으셨나요?
+</button>
+
+</form>
+</div>
+</div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let mode = 'login';
+
+  // 테마 토글 — aggregate.html과 같은 방식
+  $('theme-toggle').addEventListener('click', () => {
+    const dark = document.documentElement.classList.toggle('dark');
+    try { localStorage.setItem('theme', dark ? 'dark' : 'light'); } catch (e) {}
+  });
+
+  const showError = (msg) => { $('error').textContent = msg; $('error').classList.remove('hidden'); };
+  const showNotice = (msg) => { $('notice').textContent = msg; $('notice').classList.remove('hidden'); };
+  const clearMsg = () => { $('error').classList.add('hidden'); $('notice').classList.add('hidden'); };
+
+  async function api(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    let data = null;
+    try { data = await res.json(); } catch (e) {}
+    if (!res.ok) throw new Error((data && data.detail) || `요청에 실패했습니다. (HTTP ${res.status})`);
+    return data;
+  }
+
+  const ACTIVE = ['bg-surface', 'text-primary', 'shadow-soft'];
+  const IDLE = ['text-on-surface-variant'];
+
+  function setMode(next) {
+    mode = next;
+    clearMsg();
+    const login = next === 'login';
+    $('tab-login').setAttribute('aria-selected', String(login));
+    $('tab-signup').setAttribute('aria-selected', String(!login));
+    $('tab-login').classList.toggle('bg-surface', login);
+    $('tab-login').classList.toggle('text-primary', login);
+    $('tab-login').classList.toggle('text-on-surface-variant', !login);
+    $('tab-signup').classList.toggle('bg-surface', !login);
+    $('tab-signup').classList.toggle('text-primary', !login);
+    $('tab-signup').classList.toggle('text-on-surface-variant', login);
+    // 회원가입 탭에서만 확인·재설정이메일 필드가 붙는다 (design.md 화면 1)
+    $('wrap-password2').classList.toggle('hidden', login);
+    $('wrap-password2').classList.toggle('flex', !login);
+    $('wrap-reset-email').classList.toggle('hidden', login);
+    $('wrap-reset-email').classList.toggle('flex', !login);
+    $('forgot').classList.toggle('hidden', !login);
+    $('submit').textContent = login ? '로그인' : '가입하기';
+    $('password').setAttribute('autocomplete', login ? 'current-password' : 'new-password');
+  }
+
+  $('tab-login').addEventListener('click', () => setMode('login'));
+  $('tab-signup').addEventListener('click', () => setMode('signup'));
+
+  $('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    clearMsg();
+    const employee_no = $('employee-no').value.trim();
+    const password = $('password').value;
+    if (!employee_no || !password) return showError('사번과 비밀번호를 입력해주세요.');
+
+    $('submit').disabled = true;
+    try {
+      if (mode === 'signup') {
+        if (password !== $('password2').value) throw new Error('비밀번호가 서로 다릅니다.');
+        await api('/api/auth/signup', { employee_no, password, reset_email: $('reset-email').value.trim() });
+        // 가입 직후 바로 로그인시켜 한 단계 줄인다
+      }
+      await api('/api/auth/login', { employee_no, password });
+      location.href = '/aggregate.html';
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      $('submit').disabled = false;
+    }
+  });
+
+  $('forgot').addEventListener('click', async () => {
+    clearMsg();
+    const employee_no = $('employee-no').value.trim();
+    if (!employee_no) return showError('사번을 입력한 뒤 다시 눌러주세요.');
+    try {
+      await api('/api/auth/reset-password-request', { employee_no });
+      // 사번 존재 여부를 알려주지 않도록 항상 같은 안내
+      showNotice('가입 시 등록한 이메일로 재설정 안내를 보냈습니다. 메일함을 확인해주세요.');
+    } catch (err) {
+      showError(err.message);
+    }
+  });
+
+  setMode('login');
+  // 이미 로그인돼 있으면 바로 들여보낸다
+  fetch('/api/auth/me').then((r) => { if (r.ok) location.href = '/aggregate.html'; });
+</script>
+</body>
+</html>

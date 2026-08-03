@@ -16,11 +16,12 @@ import threading
 import uuid
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import aggregate as ag
+import auth
 
 BASE = Path(__file__).parent
 MAX_FILE_MB = 50            # 파일 1개 상한
@@ -30,19 +31,43 @@ MAX_SESSION_MB = 500        # 세션 누적 용량 상한
 ag.load_env(BASE / ".env")
 app = FastAPI(title="엑셀 취합")
 
+
+def _auth_disabled() -> bool:
+    """명시적으로 끈 경우에만 인증을 건너뛴다.
+
+    키가 없으면 조용히 열리는 것이 아니라 503으로 닫힌다 — 설정 누락이
+    접근 제어 구멍이 되지 않도록 fail-closed로 둔다.
+    """
+    return os.environ.get("AUTH_DISABLED", "").lower() in ("1", "true", "yes")
+
+
+if _auth_disabled():
+    print("경고: AUTH_DISABLED=1 — 인증 없이 실행합니다. 로컬 개발·테스트 전용입니다.")
+
+
+def require_user(access_token: str | None = Cookie(default=None, alias=auth.ACCESS_COOKIE)) -> dict:
+    if _auth_disabled():
+        return {"id": None, "employee_no": "(인증 비활성)", "role": "user", "status": "active"}
+    return auth.current_user(access_token)
+
+
+User = Depends(require_user)
+
 # 세션: sid → {"dir": 임시폴더, "files": [UploadedFile], "bytes": 누적 바이트}
 SESSIONS: dict[str, dict] = {}
 # 잡: jid → 진행 상황. 세션과 마찬가지로 프로세스 메모리이며 재시작하면 사라진다
 JOBS: dict[str, dict] = {}
 
 
-def _session(sid: str) -> dict:
-    if sid not in SESSIONS:
+def _session(sid: str, user: dict) -> dict:
+    session = SESSIONS.get(sid)
+    # 남의 세션은 존재 자체를 알리지 않는다 (§6.2 사용자별 데이터 격리)
+    if session is None or session["owner"] != user["id"]:
         raise HTTPException(404, "세션을 찾을 수 없습니다. 페이지를 새로고침 후 다시 시도해주세요.")
-    return SESSIONS[sid]
+    return session
 
 
-def _start_job(fn) -> dict:
+def _start_job(fn, owner) -> dict:
     """긴 작업을 백그라운드 스레드로 돌리고 즉시 job_id를 돌려준다.
 
     명세 규모(30개/10만 행)에서 읽기·합성이 수십 초라 동기 응답으로는
@@ -51,7 +76,7 @@ def _start_job(fn) -> dict:
     """
     jid = uuid.uuid4().hex
     job = JOBS[jid] = {"status": "running", "phase": "준비 중", "done": 0, "total": 0,
-                       "result": None, "error": None}
+                       "result": None, "error": None, "owner": owner}
 
     def report(phase: str, done: int = 0, total: int = 0) -> None:
         job.update(phase=phase, done=done, total=total)
@@ -69,12 +94,45 @@ def _start_job(fn) -> dict:
     return {"job_id": jid}
 
 
+@app.post("/api/auth/signup")
+def auth_signup(body: dict = Body(...)) -> dict:
+    profile = auth.signup(body.get("employee_no", ""), body.get("password", ""),
+                          body.get("reset_email", ""))
+    return {"profile": profile}
+
+
+@app.post("/api/auth/login")
+def auth_login(response: Response, body: dict = Body(...)) -> dict:
+    result = auth.login(body.get("employee_no", ""), body.get("password", ""))
+    auth.set_session_cookies(response, result["token"])
+    # 토큰은 httpOnly 쿠키로만 나간다. 응답 본문에는 담지 않는다
+    return {"profile": result["profile"]}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response) -> dict:
+    auth.clear_session_cookies(response)
+    return {"ok": True}
+
+
+@app.post("/api/auth/reset-password-request")
+def auth_reset(body: dict = Body(...)) -> dict:
+    auth.request_password_reset(body.get("employee_no", ""))
+    # 사번 존재 여부와 무관하게 같은 응답 (계정 열거 방지)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(user: dict = User) -> dict:
+    return {"profile": user, "auth_enabled": not _auth_disabled()}
+
+
 @app.get("/api/job/{jid}")
-def job_status(jid: str) -> dict:
+def job_status(jid: str, user: dict = User) -> dict:
     job = JOBS.get(jid)
-    if job is None:
+    if job is None or job["owner"] != user["id"]:
         raise HTTPException(404, "작업을 찾을 수 없습니다. 페이지를 새로고침 후 다시 시도해주세요.")
-    return job
+    return {k: v for k, v in job.items() if k != "owner"}
 
 
 def _file_view(fid: int, uf) -> dict:
@@ -92,19 +150,20 @@ def _file_view(fid: int, uf) -> dict:
 
 
 @app.post("/api/session")
-def create_session() -> dict:
+def create_session(user: dict = User) -> dict:
     sid = uuid.uuid4().hex
-    SESSIONS[sid] = {"dir": Path(tempfile.mkdtemp(prefix="agg-")), "files": [], "bytes": 0}
+    SESSIONS[sid] = {"dir": Path(tempfile.mkdtemp(prefix="agg-")), "files": [], "bytes": 0,
+                     "owner": user["id"]}
     return {"sid": sid}
 
 
 @app.post("/api/session/{sid}/files")
-async def upload_files(sid: str, files: list[UploadFile] = File(...)) -> dict:
+async def upload_files(sid: str, files: list[UploadFile] = File(...), user: dict = User) -> dict:
     """저장까지만 동기로 하고, 느린 구조 인식은 잡으로 넘긴다.
 
     거부 사유(확장자·용량·개수)는 즉시 400으로 돌려줘야 하므로 여기서 검사한다.
     """
-    session = _session(sid)
+    session = _session(sid, user)
     pending: list[Path] = []
     for up in files:
         name = Path(up.filename or "").name
@@ -131,12 +190,12 @@ async def upload_files(sid: str, files: list[UploadFile] = File(...)) -> dict:
         # fid는 세션 내 인덱스이므로 누적된 전체 목록을 돌려준다
         return {"files": [_file_view(i, uf) for i, uf in enumerate(session["files"])]}
 
-    return _start_job(work)
+    return _start_job(work, user["id"])
 
 
 @app.post("/api/session/{sid}/review")
-def review(sid: str, body: dict = Body(default={})) -> dict:
-    session = _session(sid)
+def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
+    session = _session(sid, user)
     no_ai = bool((body or {}).get("no_ai"))
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
     # 키 컬럼·선택 입력 컬럼을 사용자가 고르면 엔진의 rules 경로로 넘긴다
@@ -189,12 +248,12 @@ def review(sid: str, body: dict = Body(default={})) -> dict:
         report("검토 완료", total, total)
         return {"files": out, "columns": list(dict.fromkeys(columns))}
 
-    return _start_job(work)
+    return _start_job(work, user["id"])
 
 
 @app.post("/api/session/{sid}/aggregate")
-def aggregate(sid: str, body: dict = Body(default={})) -> dict:
-    session = _session(sid)
+def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
+    session = _session(sid, user)
     files = session["files"]
     included = set(body.get("included") or [])
     # included는 사용자의 최종 선택이므로 등급으로 재필터링하지 않는다 (§7 강제 포함)
@@ -248,12 +307,12 @@ def aggregate(sid: str, body: dict = Body(default={})) -> dict:
             "notes": list(dict.fromkeys(notes)),
         }
 
-    return _start_job(work)
+    return _start_job(work, user["id"])
 
 
 @app.get("/api/session/{sid}/download/{kind}")
-def download(sid: str, kind: str):
-    session = _session(sid)
+def download(sid: str, kind: str, user: dict = User):
+    session = _session(sid, user)
     path = session.get("result" if kind == "result" else "report")
     if not path or not Path(path).exists():
         raise HTTPException(404, "아직 생성되지 않은 파일입니다.")

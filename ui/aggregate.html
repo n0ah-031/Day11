@@ -177,8 +177,9 @@
 <div class="flex items-center gap-4">
 <nav class="hidden md:flex items-center gap-8">
 <a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="#">이력</a>
-<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="#">관리자 콘솔</a>
-<button class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
+<a id="nav-admin" class="hidden text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="#">관리자 콘솔</a>
+<span id="nav-user" class="hidden text-body-sm font-body-sm text-on-surface-variant"></span>
+<button id="nav-logout" class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
 </nav>
 <!-- 라이트/다크 전환 토글 (모바일에서도 항상 노출) -->
 <button id="theme-toggle" type="button" aria-label="라이트/다크 모드 전환" aria-pressed="false"
@@ -401,9 +402,31 @@ AI 검증 없이 빠르게 검토
     const res = await fetch(path, opts);
     let body = null;
     try { body = await res.json(); } catch (e) {}
+    if (res.status === 401) {
+      // 세션이 끊기면 진행 중 화면을 붙들고 있지 말고 로그인으로 보낸다
+      location.href = '/login.html';
+      throw new Error('로그인이 필요합니다.');
+    }
     if (!res.ok) throw new Error((body && body.detail) || `요청에 실패했습니다. (HTTP ${res.status})`);
     return body;
   }
+
+  // 진입 시 인증 확인. 인증을 끈 개발 모드에서는 사용자 표시를 숨긴다
+  (async function guard() {
+    const res = await fetch('/api/auth/me');
+    if (res.status === 401) { location.href = '/login.html'; return; }
+    if (!res.ok) return;
+    const { profile, auth_enabled } = await res.json();
+    if (!auth_enabled) return;
+    $('nav-user').textContent = profile.employee_no;
+    $('nav-user').classList.remove('hidden');
+    if (profile.role === 'admin') $('nav-admin').classList.remove('hidden');
+  })();
+
+  $('nav-logout').addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    location.href = '/login.html';
+  });
 
   function showError(msg) {
     $('error-text').textContent = msg;

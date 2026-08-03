@@ -2,13 +2,18 @@
 """server.py 자체 점검. 실행: python3 test_server.py (프레임워크 없음)"""
 
 import io
+import os
 import sys
 import time
 
 import openpyxl
 from fastapi.testclient import TestClient
 
-import server
+# 취합 API 시나리오는 Supabase 없이 돌아야 하므로 인증을 명시적으로 끈다.
+# 인증 자체는 test_auth.py에서 실제 Supabase를 상대로 검증한다.
+os.environ["AUTH_DISABLED"] = "1"
+
+import server  # noqa: E402
 
 client = TestClient(server.app)
 

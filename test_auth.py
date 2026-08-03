@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""인증(F4-1) 점검. 실행: python3 test_auth.py
+
+test_server.py와 달리 **실제 Supabase 프로젝트를 상대로** 돈다.
+.env의 SUPABASE_* 값이 필요하며 네트워크를 쓴다.
+
+테스트 계정은 매 실행마다 새로 만들고 끝나면 지운다. 사번에 `zz-test-`
+접두사를 붙여 실계정과 구분한다.
+"""
+
+from __future__ import annotations
+
+import io
+import os
+import sys
+import uuid
+
+import httpx
+import openpyxl
+
+import aggregate as ag
+from pathlib import Path
+
+ag.load_env(Path(__file__).parent / ".env")
+os.environ.pop("AUTH_DISABLED", None)          # 인증을 켠 상태로 돌려야 한다
+
+from fastapi.testclient import TestClient       # noqa: E402
+
+import auth                                     # noqa: E402
+import server                                   # noqa: E402
+
+EMP = f"zz-test-{uuid.uuid4().hex[:10]}"
+PW = "test-" + uuid.uuid4().hex[:12]
+RESET_EMAIL = "aggregation-test@example.com"
+created_user_id: str | None = None
+
+
+def book_bytes() -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "예산"
+    ws["A1"] = "실적 보고"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+    ws.append([None, None, None])
+    for row in [["사번", "부서", "예산액"], ["A1", "기획부", 100]]:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_protected_without_login():
+    """로그인 없이는 취합 API에 접근할 수 없어야 한다."""
+    anon = TestClient(server.app)
+    for method, path in [("post", "/api/session"), ("get", "/api/auth/me"),
+                         ("get", "/api/job/아무거나")]:
+        res = getattr(anon, method)(path)
+        assert res.status_code == 401, f"{path} → {res.status_code} (401이어야 함)"
+    print("  ✓ 미로그인 차단(401)")
+
+
+def test_signup_and_login():
+    global created_user_id
+    client = TestClient(server.app)
+
+    # 입력 검증
+    bad = client.post("/api/auth/signup",
+                      json={"employee_no": "a", "password": PW, "reset_email": RESET_EMAIL})
+    assert bad.status_code == 400 and "사번" in bad.json()["detail"], bad.text
+    bad = client.post("/api/auth/signup",
+                      json={"employee_no": EMP, "password": "short", "reset_email": RESET_EMAIL})
+    assert bad.status_code == 400 and "비밀번호" in bad.json()["detail"], bad.text
+
+    res = client.post("/api/auth/signup",
+                      json={"employee_no": EMP, "password": PW, "reset_email": RESET_EMAIL})
+    assert res.status_code == 200, res.text
+    profile = res.json()["profile"]
+    created_user_id = profile["id"]
+    assert profile["employee_no"] == EMP and profile["role"] == "user", profile
+    assert profile["status"] == "active", profile
+
+    # 같은 사번 재가입은 막힌다
+    dup = client.post("/api/auth/signup",
+                      json={"employee_no": EMP, "password": PW, "reset_email": RESET_EMAIL})
+    assert dup.status_code == 409, dup.text
+    print("  ✓ 가입(입력 검증 + 사번 중복 409)")
+
+    # 틀린 비밀번호 — 사번 존재 여부를 노출하지 않는 같은 메시지
+    wrong = client.post("/api/auth/login", json={"employee_no": EMP, "password": "wrong-pw-123"})
+    missing = client.post("/api/auth/login", json={"employee_no": "zz-none", "password": PW})
+    assert wrong.status_code == missing.status_code == 401, (wrong.text, missing.text)
+    assert wrong.json()["detail"] == missing.json()["detail"], "계정 열거가 가능하면 안 된다"
+
+    ok = client.post("/api/auth/login", json={"employee_no": EMP, "password": PW})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["profile"]["employee_no"] == EMP
+    # 토큰은 본문에 실리지 않고 httpOnly 쿠키로만 나간다
+    assert "access_token" not in ok.text, "토큰이 응답 본문에 노출됐다"
+    cookie = ok.cookies.get(auth.ACCESS_COOKIE)
+    assert cookie, ok.cookies
+    set_cookie = " ".join(ok.headers.get_list("set-cookie")).lower()
+    assert "httponly" in set_cookie and "samesite=lax" in set_cookie, set_cookie
+    print("  ✓ 로그인(계정 열거 방지 + httpOnly·SameSite 쿠키)")
+    return client
+
+
+def test_authenticated_flow(client: TestClient):
+    """로그인한 클라이언트는 취합 전 구간을 쓸 수 있다."""
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200 and me.json()["profile"]["employee_no"] == EMP, me.text
+    assert me.json()["auth_enabled"] is True
+
+    sid = client.post("/api/session").json()["sid"]
+    res = client.post(f"/api/session/{sid}/files",
+                      files=[("files", ("기획부.xlsx", book_bytes(), "application/octet-stream"))])
+    assert res.status_code == 200, res.text
+    jid = res.json()["job_id"]
+    for _ in range(2000):
+        job = client.get(f"/api/job/{jid}").json()
+        if job["status"] != "running":
+            break
+    assert job["status"] == "done", job
+    assert "owner" not in job, "소유자 정보가 응답에 새어나가면 안 된다"
+    print("  ✓ 로그인 후 취합 API 사용 가능")
+    return sid
+
+
+def test_isolation(sid: str):
+    """다른 사용자의 세션·잡은 보이지 않아야 한다 (§6.2)."""
+    other_emp = f"zz-test-{uuid.uuid4().hex[:10]}"
+    other = TestClient(server.app)
+    made = other.post("/api/auth/signup",
+                      json={"employee_no": other_emp, "password": PW, "reset_email": RESET_EMAIL})
+    assert made.status_code == 200, made.text
+    other_id = made.json()["profile"]["id"]
+    try:
+        assert other.post("/api/auth/login",
+                          json={"employee_no": other_emp, "password": PW}).status_code == 200
+        # 남의 sid는 존재 자체를 알리지 않는다
+        assert other.post(f"/api/session/{sid}/review", json={"no_ai": True}).status_code == 404
+        assert other.get(f"/api/session/{sid}/download/result").status_code == 404
+        print("  ✓ 사용자 간 세션 격리(404)")
+    finally:
+        _delete_user(other_id)
+
+
+def test_logout(client: TestClient):
+    assert client.post("/api/auth/logout").status_code == 200
+    assert client.get("/api/auth/me").status_code == 401, "로그아웃 후에도 접근되면 안 된다"
+    print("  ✓ 로그아웃")
+
+
+def _delete_user(user_id: str | None) -> None:
+    if not user_id:
+        return
+    key = auth._secret_key()
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    # profiles는 auth.users FK가 ON DELETE CASCADE라 함께 지워진다
+    httpx.delete(f"{os.environ['SUPABASE_URL']}/auth/v1/admin/users/{user_id}",
+                 headers=headers, timeout=20)
+
+
+def main() -> int:
+    if not auth.configured():
+        print("건너뜀: .env에 SUPABASE_URL·SUPABASE_PUBLISHABLE_KEY·SUPABASE_SECRET_KEY가 필요합니다.")
+        return 0
+    try:
+        test_protected_without_login()
+        client = test_signup_and_login()
+        sid = test_authenticated_flow(client)
+        test_isolation(sid)
+        test_logout(client)
+    finally:
+        _delete_user(created_user_id)
+    print("\n전체 통과")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
