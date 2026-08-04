@@ -140,6 +140,9 @@ structure에는 파일에서 찾은 **표 목록**이 들어 있습니다(표마
 확실하지 않으면 **추측하지 말고 사용자에게 물어보세요.** 정한 표 이름을 selected_sheets에
 그대로(structure의 name과 글자 단위로 같게) 담고, fields는 **고른 표의 헤더만** 다룹니다.
 표가 하나면 selected_sheets에 그 하나를 담습니다.
+structure.other_tables는 **이름만 있는 나머지 표**입니다(이미 표를 골랐기 때문에 상세를
+싣지 않았습니다). 사용자가 표를 바꾸겠다고 하면 그 이름을 selected_sheets에 담으세요 —
+다음 턴에 그 표의 상세가 옵니다. 이름만 보고 항목을 지어내지는 마세요.
 
 지켜야 할 것:
 - **항목 이름(name)은 헤더 문자열을 글자 그대로 옮깁니다.** 다듬거나 번역하거나 * 표시를
@@ -518,10 +521,19 @@ def recognize_turn(messages: list[dict], spec: dict, structural: dict, model: st
     읽을 상황이 언제나 같이 온다. 호출을 나누면 매 턴 값을 두 번 내는 셈이다.
     """
     turn = len([m for m in messages if m.get("role") == "user"])
+    # 회신받을 표가 정해지면 나머지 표는 **이름만** 보낸다. 실측에서 표 6개짜리 파일은
+    # 헤더가 142개라 매 턴 11.7k 입력 토큰이 들었는데, 고른 뒤로는 그 대부분이 쓰이지
+    # 않는다. 이름을 남기는 이유는 사용자가 표를 바꿀 수 있어야 하기 때문이다.
+    sheets = (structural or {}).get("sheets") or []
+    picked = selected_tables(spec or {}, structural)
+    shown = structural
+    if picked and len(picked) < len(sheets):
+        shown = {**(structural or {}), "sheets": picked,
+                 "other_tables": [s.get("name") for s in sheets if s not in picked]}
     payload = {
         "conversation": [{"role": m.get("role"), "content": m.get("content")} for m in messages],
         "current_spec": spec or {},
-        "structure": structural,
+        "structure": shown,
         "attachments": [{"name": a.get("original_name"), "kind": a.get("kind"),
                          "content": (a.get("extracted") or "")[:ATTACH_CHARS]}
                         for a in (attachments or [])],

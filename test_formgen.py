@@ -412,6 +412,17 @@ def test_recognize_turn(tmp: Path):
     out = fg.recognize_turn([{"role": "user", "content": "첫 표로"}], {}, many, "m", client=stub)
     assert out["spec_complete"] is True and out["gaps"] == [], out
 
+    # 표가 정해진 뒤에는 나머지 표를 **이름만** 보낸다 — 실측에서 표 6개(헤더 142개) 파일이
+    # 매 턴 11.7k 입력 토큰을 썼고, 고른 뒤로는 그 대부분이 쓰이지 않는다. 이름을 남기는
+    # 것은 사용자가 표를 바꿀 수 있어야 하기 때문이다
+    stub = Stub([{"intent": "recognize", "reply": "확인", "spec_json": picked,
+                  "recognize_complete": True}])
+    fg.recognize_turn([{"role": "user", "content": "그대로"}], picked, many, "m", client=stub)
+    sent = stub.seen[0]
+    assert "문제점" not in sent, "고르지 않은 표의 헤더까지 보내고 있다"
+    assert "<참고> 작성 가이드" in sent, "표를 바꿀 수 있도록 이름은 남아야 한다"
+    assert "예산집행" in sent, sent[:200]
+
     # ⑥ 턴 상한에서 마감 지시 + 전송 payload 마스킹
     stub = Stub([{"intent": "recognize", "reply": "마감", "spec_json": exact,
                   "recognize_complete": True}])
