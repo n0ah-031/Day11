@@ -263,6 +263,13 @@
 <p id="template-note" class="text-body-sm font-body-sm text-on-surface-variant">AI로 만든 양식을 고르면 그 양식의 필수·선택 구분을 아래에 채웁니다. 채운 뒤에도 직접 바꿀 수 있습니다.</p>
 </div>
 
+<!-- 취합할 표 고르기. 표가 하나뿐이면 고를 것이 없으니 숨긴다 -->
+<div id="sheet-row" class="hidden mb-4 flex flex-col gap-2">
+<label class="text-body-md font-body-md font-semibold text-on-surface">취합할 표</label>
+<div id="sheet-pick" class="flex flex-wrap gap-2"></div>
+<p id="sheet-note" class="text-body-sm font-body-sm text-on-surface-variant">작성 가이드·비워 둔 대장처럼 취합 대상이 아닌 시트는 빼세요. 한 시트에 표가 여러 개면 <span class="font-semibold">(1)·(2)</span>로 나뉘어 나옵니다.</p>
+</div>
+
 <label class="text-body-md font-body-md font-semibold text-on-surface" for="key-col">키 컬럼</label>
 <select id="key-col"
         class="rounded-lg bg-surface border border-outline-variant text-body-sm font-body-sm text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
@@ -397,6 +404,7 @@ AI 검증 없이 빠르게 검토
     files: [],          // 1단계 응답
     keyCol: '',         // 키 컬럼(빈 값이면 엔진 자동)
     optionalCols: new Set(),   // 비워둬도 되는 컬럼(빈 집합이면 엔진 기본값=전 컬럼 필수)
+    sheets: null,       // 취합할 표 이름. null이면 아직 정하지 않음(=전체)
     deptNames: {},      // fid → 부서명. 비우면 파일명을 쓴다
     review: null,       // 2단계 응답
     included: new Set(),
@@ -591,11 +599,41 @@ AI 검증 없이 빠르게 검토
     renderKeyCol();
   }
 
+  function renderSheets() {
+    // 전 파일 표 이름의 합집합(순서 보존). 표마다 몇 개 파일에 있는지 함께 보여준다 —
+    // 12개 회신본 중 일부에만 있는 표는 양식이 다르다는 신호다.
+    const count = new Map();
+    state.files.forEach((f) => (f.sheets || []).forEach((s) => {
+      count.set(s.name, (count.get(s.name) || 0) + 1);
+    }));
+    const names = [...count.keys()];
+    if (state.sheets === null) state.sheets = new Set(names);        // 기본은 전체
+    else state.sheets = new Set([...state.sheets].filter((n) => count.has(n)));
+    $('sheet-row').classList.toggle('hidden', names.length < 2);
+    $('sheet-pick').innerHTML = names.map((n) => {
+      const on = state.sheets.has(n);
+      return `<button data-sheet="${esc(n)}" class="px-5 py-3 rounded-full border text-body-sm font-medium transition-all ${
+        on ? 'bg-primary text-on-primary border-primary shadow-soft'
+           : 'bg-surface text-on-surface-variant border-outline-variant hover:border-primary/40 hover:text-primary'}">${esc(n)} <span class="opacity-70">· ${count.get(n)}개 파일</span></button>`;
+    }).join('');
+    $('sheet-pick').querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => {
+        const n = b.dataset.sheet;
+        state.sheets.has(n) ? state.sheets.delete(n) : state.sheets.add(n);
+        renderKeyCol();
+      });
+    });
+    return names.length;
+  }
+
   function renderKeyCol() {
-    // 전 파일·전 시트 헤더의 합집합(순서 보존·중복 제거)
-    const heads = [...new Set(state.files.flatMap((f) => (f.sheets || []).flatMap((s) => s.headers || []))
-                                         .filter(Boolean))];
-    $('key-col-panel').classList.toggle('hidden', !heads.length);
+    const sheetCount = renderSheets();
+    // 고른 표의 헤더만 후보로 쓴다. 뺀 표의 컬럼이 섞이면 키 컬럼 목록이 지저분해진다
+    const heads = [...new Set(state.files
+      .flatMap((f) => (f.sheets || []).filter((s) => !state.sheets || state.sheets.has(s.name)))
+      .flatMap((s) => s.headers || []).filter(Boolean))];
+    // 표를 다 빼면 헤더도 없어지지만, 표 선택 자체는 계속 보여야 되돌릴 수 있다
+    $('key-col-panel').classList.toggle('hidden', !heads.length && sheetCount < 2);
     $('key-col').innerHTML = '<option value="">자동 (첫 컬럼 또는 사번·코드 등 키워드)</option>'
       + heads.map((h) => `<option value="${esc(h)}"${state.keyCol === h ? ' selected' : ''}>${esc(h)}</option>`).join('');
 
@@ -670,6 +708,7 @@ AI 검증 없이 빠르게 검토
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ no_ai: $('no-ai').checked, key_col: state.keyCol || null,
                                optional_cols: [...state.optionalCols],
+                               sheets: state.sheets ? [...state.sheets] : null,
                                dept_names: state.deptNames })
       }, '파일을 검토하는 중…');
       state.included = new Set(state.review.files.filter((f) => f.default_checked).map((f) => f.fid));

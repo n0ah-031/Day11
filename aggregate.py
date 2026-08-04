@@ -214,13 +214,33 @@ def _is_summary_or_note(row: list) -> bool:
     filled = [v for v in row if not _is_blank(v)]
     if not filled:
         return False
-    head = str(row[0]).replace(" ", "").strip() if not _is_blank(row[0]) else ""
+    # 표가 A열부터 시작한다고 볼 수 없다 — 실제 양식은 B열부터 그리는 것이 흔하고,
+    # 그러면 row[0]만 보는 판정은 '합계' 표기를 놓쳐 합계 행이 레코드로 들어온다.
+    head = str(filled[0]).replace(" ", "").strip()
     if head in TOTAL_LABELS:
         return True
     # 칸 하나에 안내 문구만 있는 행 (표 아래 각주)
     if len(filled) == 1 and isinstance(filled[0], str):
         return filled[0].strip().startswith(NOTE_PREFIXES)
     return False
+
+
+def _is_template_row(row: list, headers: list[str]) -> bool:
+    """순번만 채워진 빈 서식 행인지.
+
+    실무 양식은 순번을 1..N까지 미리 적어 두고 회신자가 그중 일부만 채운다(실측: 의견수렴
+    시트에 25행이 미리 매겨져 있고 10건만 작성). 이 행을 레코드로 보면 남은 15행 × 컬럼 수
+    만큼 '필수값 누락'이 쌓여 그 파일이 오류가 되고, 취합 결과에도 빈 행이 들어간다.
+
+    판정은 좁게 둔다 — **표의 첫 컬럼에 숫자 하나만** 있고 나머지가 전부 빈 행.
+    """
+    if len(headers) < 3:
+        return False
+    filled = [(i, v) for i, v in enumerate(row) if not _is_blank(v)]
+    if len(filled) != 1:
+        return False
+    first = next((i for i, h in enumerate(headers) if h), None)
+    return filled[0][0] == first and _is_number(filled[0][1])
 
 
 def _looks_like_data(row: list) -> bool:
@@ -249,6 +269,154 @@ def _find_header(grid: list[list]) -> int:
             if [v for v in (grid[i + 1] if i + 1 < len(grid) else []) if not _is_blank(v)]:
                 return i
     return -1
+
+
+def _header_block(grid: list[list], hi: int,
+                  merged: list[tuple[int, int, int, int]]) -> tuple[int, int]:
+    """헤더가 몇 행에 걸쳐 있는지 `(첫 행, 마지막 행)`을 0-base로 돌려준다.
+
+    계층 헤더의 실제 표기법은 정해져 있다 — 단일 컬럼은 상·하위 행을 **세로로 병합**하고
+    (`B35:C36`), 2단 컬럼은 상위를 **가로로 병합**한 뒤 하위 행에 자식을 둔다(`AE35:AI35`
+    아래 가능성·중대성·위험성). 그래서 병합만 보면 범위가 정확히 나온다.
+
+    `_find_header`는 '다음 행이 데이터로 보이는' 행을 고르므로 계층 헤더에서는 **맨 아래 단**을
+    집는다. 위로 걸쳐 있는 병합을 따라 올라가 첫 단을 찾는다.
+    """
+    top = hi
+    while True:
+        # 이 행이 위에서 시작한 병합 안에 있으면 그 시작 행이 헤더의 윗단이다
+        above = [r0 for r0, _, r1, _ in merged if r0 <= top and top + 1 <= r1 and r0 < top + 1]
+        if not above:
+            break
+        top = max(above) - 1
+    bottom = max([hi] + [r1 - 1 for r0, _, r1, _ in merged if r0 == top + 1])
+    return top, min(bottom, len(grid) - 1)
+
+
+def _compose_headers(grid: list[list], top: int, bottom: int,
+                     merged: list[tuple[int, int, int, int]]) -> list[str]:
+    """계층 헤더를 컬럼당 한 줄로 합친다. `조치 전 위험성평가 중대성` 처럼.
+
+    합치지 않으면 하위 단만 남아 `중대성`이 조치 전·후 두 컬럼에 같은 이름으로 붙는다.
+    상위 이름은 **자기 값이 있는 칸에만** 붙인다 — 가로 병합 범위 전체에 뿌리면 한 이름이
+    여러 컬럼에 중복된다.
+    """
+    ncols = max((len(grid[r]) for r in range(top, bottom + 1)), default=0)
+    tiers = list(range(top, bottom + 1))
+    # 상위 단은 가로 병합 범위로 펼쳐 둔다(하위 칸의 부모를 찾기 위해서만 쓴다)
+    spread = []
+    for r in tiers:
+        row = [grid[r][c] if c < len(grid[r]) else None for c in range(ncols)]
+        for r0, c0, r1, c1 in merged:
+            if r0 == r + 1 and c1 > c0:
+                value = grid[r0 - 1][c0 - 1] if c0 - 1 < len(grid[r0 - 1]) else None
+                for c in range(c0 - 1, min(c1, ncols)):
+                    if _is_blank(row[c]):
+                        row[c] = value
+        spread.append(row)
+
+    names = []
+    for c in range(ncols):
+        leaf = next((i for i in range(len(tiers) - 1, -1, -1)
+                     if c < len(grid[tiers[i]]) and not _is_blank(grid[tiers[i]][c])), None)
+        if leaf is None:
+            names.append("")
+            continue
+        parts = [str(spread[i][c]).strip() for i in range(leaf) if not _is_blank(spread[i][c])]
+        parts.append(str(grid[tiers[leaf]][c]).strip())
+        out: list[str] = []
+        for part in parts:                 # 세로 병합이면 같은 말이 위아래로 반복된다
+            if not out or out[-1] != part:
+                out.append(part)
+        names.append(" ".join(out))
+    while names and names[-1] == "":
+        names.pop()
+    return names
+
+
+def _split_tables(grid: list[list], merged: list[tuple[int, int, int, int]]
+                  ) -> list[tuple[int, list[str], list[list], list[int], list[int]]]:
+    """시트를 표 단위로 나눈다. 표당 `(헤더 인덱스, 헤더, 행, 원본 행번호, 제외 행번호)`.
+
+    대개 표는 하나지만, 실제 양식은 한 시트에 표를 쌓아 두기도 한다(§4의 분기별 실적
+    양식은 재해유형×월 피벗 아래에 아차사고 상세 목록이 또 있다).
+    """
+    out = []
+    start = 0
+    while start < len(grid):
+        sub = grid[start:]
+        hi = _find_header(sub)
+        if hi < 0:
+            break
+        # 계층 헤더는 여러 행이다. 병합으로 범위를 잡고 한 줄로 합친 뒤, 데이터는 그 아래부터.
+        sub_merged = [(r0 - start, c0, r1 - start, c1) for r0, c0, r1, c1 in merged
+                      if r1 - start >= 1]
+        top, bottom = _header_block(sub, hi, sub_merged)
+        headers = _compose_headers(sub, top, bottom, sub_merged)
+        hi = top
+        rows: list[list] = []
+        row_numbers: list[int] = []
+        dropped: list[int] = []
+        blanks: list[int] = []
+        blank_run = 0
+        j = bottom + 1
+        while j < len(sub):
+            row = list(sub[j])[:len(headers)] + [None] * max(0, len(headers) - len(sub[j]))
+            if all(_is_blank(v) for v in row):
+                blank_run += 1
+                if blank_run > BLANK_ROW_TOLERANCE:
+                    break
+                j += 1
+                continue
+            blank_run = 0
+            if _is_summary_or_note(row):
+                dropped.append(start + j + 1)
+                j += 1
+                continue
+            if _is_template_row(row, headers):
+                blanks.append(start + j + 1)
+                j += 1
+                continue
+            if rows and _starts_new_table(row, rows):
+                break                       # 여기부터는 다음 표다. j를 넘기지 않는다
+            rows.append(row)
+            row_numbers.append(start + j + 1)
+            j += 1
+        out.append((start + hi, headers, rows, row_numbers, dropped, blanks))
+        start += max(j, hi + 1)             # 최소 한 행은 전진해 무한 루프를 막는다
+    return out
+
+
+def _sheet_selected(title: str, selected: set[str]) -> bool:
+    """이 시트를 읽어야 하는지. 한 시트가 표 여러 개로 나뉘면 이름이 '시트명 (2)'가 되므로
+    그중 하나라도 골라져 있으면 시트를 읽어야 한다."""
+    return title in selected or any(s.startswith(f"{title} (") for s in selected)
+
+
+def _starts_new_table(row: list, rows: list[list]) -> bool:
+    """이 행이 **다음 표의 헤더**인지. 실제 양식은 한 시트에 표를 여러 개 쌓아 둔다.
+
+    빈 행 한 줄만 두고 다음 표가 시작되면 `BLANK_ROW_TOLERANCE`로는 끊기지 않아, 둘째
+    표의 헤더와 데이터가 첫 표의 행으로 섞여 들어간다(실측: 그 시트 이슈 132건 중 132건이
+    이것 때문이었다).
+
+    판정은 지금까지 읽은 행에서 만든 타입 프로파일을 쓴다 — 숫자로 채워져 온 컬럼에
+    글자가 들어오면서 그 행이 온통 글자면 새 표의 헤더다. '전 컬럼이 텍스트인 표'의
+    데이터 행은 프로파일이 깨지지 않으므로 걸리지 않는다.
+    """
+    filled = [v for v in row if not _is_blank(v)]
+    if len(filled) < 2 or not all(isinstance(v, str) for v in filled):
+        return False
+    for c in range(len(row)):
+        if _is_blank(row[c]) or not isinstance(row[c], str):
+            continue
+        seen = [r[c] for r in rows if c < len(r) and not _is_blank(r[c])]
+        if len(seen) < 2:
+            continue
+        numeric = sum(1 for v in seen if not isinstance(v, str))
+        if numeric >= len(seen) * 0.8:
+            return True
+    return False
 
 
 def _read_images(ws) -> list[dict]:
@@ -291,7 +459,14 @@ def _read_images(ws) -> list[dict]:
     return out
 
 
-def read_file(path: Path, include_hidden: bool = False) -> UploadedFile:
+def read_file(path: Path, include_hidden: bool = False,
+              include_sheets: set[str] | None = None) -> UploadedFile:
+    """xlsx 한 개를 읽는다.
+
+    `include_sheets`를 주면 그 시트만 읽는다. 실제 양식에는 취합 대상이 아닌 시트가
+    섞여 있다 — 작성 가이드, 비워 둔 대장, 지사별로 이름이 다른 총괄표. 어느 시트가
+    데이터인지는 담당자가 알고 있으므로 이름 규칙으로 맞히지 않고 골라 받는다.
+    """
     uf = UploadedFile(path=path, dept=path.stem)
     if path.suffix.lower() != ".xlsx":
         uf.readable = False
@@ -312,56 +487,65 @@ def read_file(path: Path, include_hidden: bool = False) -> UploadedFile:
     for ws in wb.worksheets:
         if ws.sheet_state != "visible" and not include_hidden:
             continue
+        # 고르지 않은 시트는 사유도 남기지 않는다 — 사용자가 뺀 것이라 조치할 것이 없다.
+        # 시트를 표 여러 개로 나눠 읽는 경우(_split) 그 이름들도 함께 본다.
+        if include_sheets is not None and not _sheet_selected(ws.title, include_sheets):
+            continue
         grid = [list(r) for r in ws.iter_rows(values_only=True)]
         images = _read_images(ws)
         if not any(not _is_blank(v) for row in grid for v in row) and not images:
             skipped.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
                                  "시트에 데이터가 없습니다. 해결방법: 빈 시트를 삭제하거나 데이터를 입력 후 재시도."))
             continue
-        hi = _find_header(grid)
-        if hi < 0:
+        merged = [(r.min_row, r.min_col, r.max_row, r.max_col) for r in ws.merged_cells.ranges]
+        tables = _split_tables(grid, merged)
+        if not tables:
             skipped.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", ERROR,
                                  "헤더(열 제목) 행을 찾을 수 없습니다. 해결방법: 제목·로고 행과 데이터 사이에 "
                                  "명확한 열 제목 행이 있는지 확인해주세요."))
             continue
 
-        headers = [str(v).strip() if not _is_blank(v) else "" for v in grid[hi]]
-        while headers and headers[-1] == "":
-            headers.pop()
-        merged = [(r.min_row, r.min_col, r.max_row, r.max_col) for r in ws.merged_cells.ranges]
-        rows: list[list] = []
-        row_numbers: list[int] = []
-        dropped: list[int] = []
-        blank_run = 0
-        for j in range(hi + 1, len(grid)):
-            row = list(grid[j])[:len(headers)] + [None] * max(0, len(headers) - len(grid[j]))
-            if all(_is_blank(v) for v in row):
-                blank_run += 1
-                if blank_run > BLANK_ROW_TOLERANCE:
-                    break
+        added = 0
+        for part, (hi, headers, rows, row_numbers, dropped, blanks) in enumerate(tables, 1):
+            # 표가 둘 이상이면 뒤 표에 이름을 붙인다. 시작 행이 파일마다 같으므로
+            # 모드 B에서 같은 표끼리 묶인다(실측: 12개 회신본 모두 35행에서 둘째 표 시작).
+            name = ws.title if len(tables) == 1 else f"{ws.title} ({part})"
+            # 어떤 행이 데이터인지는 원본 기준으로 먼저 정하고, 병합 값은 그 뒤에 채운다.
+            # 순서가 바뀌면 미리 병합해 둔 빈 템플릿 행까지 값이 생겨 데이터로 되살아난다.
+            _fill_merged(rows, row_numbers, merged)
+            if dropped:
+                uf.issues.append(Issue(path.name, name, f"{dropped[0]}행" if len(dropped) == 1
+                                       else f"{dropped[0]}~{dropped[-1]}행",
+                                       "정합성", "1단계", WARN,
+                                       f"합계·각주로 보이는 {len(dropped)}개 행을 취합에서 제외했습니다"
+                                       f"(행 {', '.join(map(str, dropped))}). 데이터 행이라면 "
+                                       "첫 칸의 '합계' 같은 표기를 지워주세요."))
+            if blanks:
+                uf.issues.append(Issue(path.name, name, f"{blanks[0]}~{blanks[-1]}행",
+                                       "정합성", "1단계", WARN,
+                                       f"순번만 있고 내용이 비어 있는 {len(blanks)}개 행을 취합에서 "
+                                       f"제외했습니다(행 {blanks[0]}~{blanks[-1]}). 작성하려던 "
+                                       "행이라면 내용을 채워주세요."))
+            if not rows:
+                if len(tables) == 1:
+                    skipped.append(Issue(path.name, name, "(해당없음)", "누락", "1단계", ERROR,
+                                         "헤더는 있으나 입력된 데이터가 없습니다. "
+                                         "해결방법: 데이터를 입력 후 재시도."))
                 continue
-            blank_run = 0
-            if _is_summary_or_note(row):
-                dropped.append(j + 1)
+            if include_sheets is not None and name not in include_sheets:
                 continue
-            rows.append(row)
-            row_numbers.append(j + 1)
-        # 어떤 행이 데이터인지는 원본 기준으로 먼저 정하고, 병합 값은 그 뒤에 채운다.
-        # 순서가 바뀌면 미리 병합해 둔 빈 템플릿 행까지 값이 생겨 데이터로 되살아난다.
-        _fill_merged(rows, row_numbers, merged)
-        if dropped:
-            uf.issues.append(Issue(path.name, ws.title, f"{dropped[0]}행" if len(dropped) == 1
-                                   else f"{dropped[0]}~{dropped[-1]}행",
-                                   "정합성", "1단계", WARN,
-                                   f"합계·각주로 보이는 {len(dropped)}개 행을 취합에서 제외했습니다"
-                                   f"(행 {', '.join(map(str, dropped))}). 데이터 행이라면 "
-                                   "첫 칸의 '합계' 같은 표기를 지워주세요."))
-        if not rows:
-            skipped.append(Issue(path.name, ws.title, "(해당없음)", "누락", "1단계", ERROR,
-                                 "헤더는 있으나 입력된 데이터가 없습니다. 해결방법: 데이터를 입력 후 재시도."))
-            continue
-        uf.sheets.append(SheetData(ws.title, hi + 1, headers, rows, row_numbers, images,
-                                   merged=merged))
+            # 이미지는 자기 표의 행 범위에 있는 것만 딸려간다. 시트 하나의 이미지를
+            # 전 표에 다 붙이면 남의 표 사진까지 그 표의 이슈로 잡힌다.
+            lo, hla = row_numbers[0], row_numbers[-1]
+            mine = [im for im in images if lo <= im["from"][0] <= hla] if len(tables) > 1 else images
+            uf.sheets.append(SheetData(name, hi + 1, headers, rows, row_numbers, mine,
+                                       merged=merged))
+            added += 1
+        if added and len(tables) > 1:
+            uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", WARN,
+                                   f"이 시트에서 표 {len(tables)}개를 찾아 따로 읽었습니다"
+                                   f"(시작 행 {', '.join(str(t[0] + 1) for t in tables)}). "
+                                   "한 표여야 한다면 표 사이의 빈 행을 지워주세요."))
 
     # 취합할 시트가 하나라도 있으면, 표가 아닌 시트는 파일을 막을 사유가 아니다.
     # 실제 업무 양식에는 '작성 주의사항'처럼 안내문만 있는 시트가 흔하다 —
@@ -623,7 +807,9 @@ def _review_images(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
     min_res = tuple(rule.get("min_resolution") or IMAGE_MIN_RESOLUTION)
     max_count = int(rule.get("max_count_per_key") or IMAGE_MAX_COUNT_PER_KEY)
     seen_hash: dict[str, str] = {}
-    per_row: dict[int, int] = {}
+    # 명세 §5.3은 "동일 키(동일 행/개체)에 대해 **필드당** 허용 개수"다. 행 단위로 세면
+    # 사진 열이 둘인 양식(문제 예시·개선 예시)에서 정상 입력이 전부 위반으로 잡힌다.
+    per_key: dict[tuple[int, int], int] = {}
 
     for im in sheet.images:
         cell = f"{get_column_letter(im['from'][1])}{im['from'][0]}"
@@ -652,12 +838,14 @@ def _review_images(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
                                        f"동일 이미지 파일 재사용({seen_hash[im['sha256']]}와 해시 일치, 담당자 확인 권고)"))
             else:
                 seen_hash[im["sha256"]] = cell
-        per_row[im["from"][0]] = per_row.get(im["from"][0], 0) + 1
+        key = (im["from"][0], im["from"][1])
+        per_key[key] = per_key.get(key, 0) + 1
 
-    for row, count in per_row.items():
+    for (row, col), count in per_key.items():
         if count > max_count:
-            uf.issues.append(Issue(uf.name, sheet.name, f"{row}행", "충돌", "1단계", ERROR,
-                                   f"허용 이미지 개수 정책 위반({count}장 > {max_count}장)"))
+            uf.issues.append(Issue(uf.name, sheet.name, f"{get_column_letter(col)}{row}",
+                                   "충돌", "1단계", ERROR,
+                                   f"한 칸에 이미지가 {count}장 있습니다(허용 {max_count}장)"))
 
 
 # ── 4.2 2단계 AI(LLM) 재검증 ─────────────────────────────────────────────────

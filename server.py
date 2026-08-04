@@ -384,6 +384,12 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
     # 부서명은 화면에서 고르거나 직접 입력한 값을 쓴다. 파일명은 기본값일 뿐이다
     if isinstance((body or {}).get("dept_names"), dict):
         session["dept_names"] = {str(k): v for k, v in body["dept_names"].items()}
+    # 취합할 표를 골랐으면 그것만 읽는다. 실제 양식에는 작성 가이드·비워 둔 대장처럼
+    # 취합 대상이 아닌 시트가 섞여 있고, 어느 것이 데이터인지는 담당자가 안다
+    # 생략하면 지난 선택을 유지하고, null을 주면 전체로 되돌린다
+    if "sheets" in (body or {}):
+        picked = body["sheets"]
+        session["sheets"] = sorted(str(s) for s in picked) if isinstance(picked, list) else None
 
     def work(report):
         total = len(session["files"])
@@ -391,13 +397,18 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
         # 재검토 시 판정이 누적되지 않도록 초기화한다. 취합이 한 번이라도 돌았으면
         # preprocess가 셀 값을 고쳐놓았으므로 그때만 원본에서 다시 읽는다
         # (파일당 재파싱이 검토 시간의 절반을 차지한다).
-        if session.get("preprocessed"):
+        # 표 선택이 바뀐 경우도 다시 읽어야 한다 — 뺐던 표를 되살릴 근거가 파일뿐이다.
+        selected = session.get("sheets")
+        if session.get("preprocessed") or selected != session.get("loaded_sheets"):
             fresh = []
             for i, uf in enumerate(session["files"]):
                 report(f"{uf.name} 원본을 다시 읽는 중", i, total)
-                fresh.append(ag.read_file(uf.path))
+                fresh.append(ag.read_file(uf.path,
+                                          include_sheets=set(selected) if selected else None))
             session["files"] = fresh
             session["preprocessed"] = False
+            session["loaded_sheets"] = selected
+            _apply_dept_names(session)          # 다시 읽으면 dept가 파일명으로 돌아간다
         else:
             for uf in session["files"]:
                 # 읽지 못한 파일은 read_file이 남긴 실패 사유가 유일한 기록이다. 지우면

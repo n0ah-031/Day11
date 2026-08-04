@@ -289,6 +289,102 @@ def test_real_form_structure(tmp: Path):
     print("  ✓ 실제 업무 양식 구조(안내 시트·세로 병합·합계·각주 행)")
 
 
+def test_stacked_tables_and_tiered_header(tmp: Path):
+    """한 시트에 표가 둘, 헤더가 여러 단인 양식에서 오탐이 없어야 한다.
+
+    실제 회신 파일(분기별 실적 취합, 지사 12건)에서 확인된 것을 그대로 재현한다.
+    이 구조에서 종전 엔진은 12개 파일 전부를 '오류'로 판정했고 이슈가 6,884건이었다.
+      ① 표가 B열부터 시작 — A열이 비어 있다
+      ② 헤더가 2단: 단일 컬럼은 세로 병합, 2단 컬럼은 상위 가로 병합 + 하위 행
+      ③ 빈 행 한 줄만 두고 **둘째 표**가 이어진다 → 첫 표가 그 헤더·데이터를 삼켰다
+      ④ 표 끝의 '합계' 행이 B열에 있어 제외되지 않았다(모드 B/D에서 이중 계상)
+      ⑤ 순번만 1..N으로 미리 매겨 둔 빈 서식 행
+      ⑥ 한 행에 사진 컬럼이 둘(문제 예시·개선 예시) — 이미지 개수 정책은 필드당이다
+    """
+    path = tmp / "1. 강남지사.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "1. 아차사고 신고 월별 세부내용"
+    ws["B2"] = "아차사고 신고 월별 세부내용"
+    ws.merge_cells("B2:H2")
+
+    # ── 첫 표: 재해유형 × 월(2단 헤더). 세로 병합 1단 + 가로 병합 상위 + 하위 행
+    ws["B4"] = "재해유형"
+    ws.merge_cells("B4:B5")                 # 단일 컬럼 → 세로 병합
+    ws["C4"] = "1월"
+    ws.merge_cells("C4:D4")                 # 상위 → 가로 병합
+    ws["C5"], ws["D5"] = "신고", "조치"      # 하위
+    for i, kind in enumerate(["끼임", "넘어짐", "떨어짐"]):
+        ws.cell(row=6 + i, column=2, value=kind)
+        ws.cell(row=6 + i, column=3, value=0)
+        ws.cell(row=6 + i, column=4, value=0)
+    ws["B9"], ws["C9"], ws["D9"] = "합계", 0, 0      # A열이 아니라 B열의 합계
+
+    # ── 빈 행 한 줄 뒤 둘째 표(2단 헤더). 하위 단이 있는 컬럼만 이름이 합쳐져야 한다
+    ws["B11"] = "구분"
+    ws.merge_cells("B11:B12")
+    ws["C11"] = "위험성평가"
+    ws.merge_cells("C11:D11")
+    ws["C12"], ws["D12"] = "가능성", "중대성"
+    for i, (kind, a, b) in enumerate([("아차사고(내부)", 2, 3), ("아차사고(외부)", 1, 2)]):
+        ws.cell(row=13 + i, column=2, value=kind)
+        ws.cell(row=13 + i, column=3, value=a)
+        ws.cell(row=13 + i, column=4, value=b)
+
+    # ── 사진 컬럼이 둘인 시트 + 순번만 매겨 둔 빈 서식 행
+    op = wb.create_sheet("3. 근로자 의견수렴, 개선")
+    op["B2"] = "근로자 제안, 개선"
+    op["B4"] = "No"
+    op.merge_cells("B4:B5")
+    op["C4"] = "관련사진"
+    op.merge_cells("C4:D4")
+    op["C5"], op["D5"] = "개선 전", "개선 후"
+    op["B6"] = 1
+    op.cell(row=6, column=5, value="완료")
+    op["E4"] = "완료 여부"
+    op.merge_cells("E4:E5")
+    for i in range(2, 6):                   # 순번만 있는 빈 서식 행 4개
+        op.cell(row=5 + i, column=2, value=i)
+    for col in ("C6", "D6"):                # 같은 행에 사진 2장(서로 다른 컬럼)
+        buf = io.BytesIO()
+        PILImage.new("RGB", (300, 300), (10, 20, 30)).save(buf, format="PNG")
+        buf.seek(0)
+        op.add_image(XLImage(buf), col)
+    wb.save(path)
+
+    uf = ag.read_file(path)
+    assert uf.readable, [i.line() for i in uf.issues]
+    names = [s.name for s in uf.sheets]
+    assert names == ["1. 아차사고 신고 월별 세부내용 (1)",
+                     "1. 아차사고 신고 월별 세부내용 (2)",
+                     "3. 근로자 의견수렴, 개선"], names
+
+    first, second, third = uf.sheets
+    # ② 계층 헤더가 한 줄로 합쳐진다. 하위 단이 없는 컬럼에는 상위 이름만 붙는다
+    assert first.headers == ["", "재해유형", "1월 신고", "1월 조치"], first.headers
+    # ③ 둘째 표를 삼키지 않고 따로 읽는다 ④ B열의 합계 행은 제외된다
+    assert first.row_numbers == [6, 7, 8], first.row_numbers
+    assert second.headers == ["", "구분", "위험성평가 가능성", "위험성평가 중대성"], second.headers
+    assert second.row_numbers == [13, 14], second.row_numbers
+    # ⑤ 순번만 있는 행은 레코드가 아니다
+    assert third.row_numbers == [6], third.row_numbers
+    assert third.headers[4] == "완료 여부", third.headers
+
+    ag.review_stage1(uf, rules={})
+    errors = [i for i in uf.issues if i.grade == ag.ERROR]
+    assert not errors, [i.line() for i in errors]
+    reasons = " ".join(i.reason for i in uf.issues)
+    assert "표 2개를 찾아" in reasons and "순번만 있고" in reasons, reasons
+    # ⑥ 사진 컬럼이 둘이어도 개수 위반이 아니다(명세 §5.3은 필드당)
+    assert "이미지가" not in reasons or "장 있습니다" not in reasons, reasons
+
+    # 표를 골라 읽을 수 있다 — 취합 대상이 아닌 표는 사유도 남기지 않는다
+    only = ag.read_file(path, include_sheets={"1. 아차사고 신고 월별 세부내용 (2)"})
+    assert [s.name for s in only.sheets] == ["1. 아차사고 신고 월별 세부내용 (2)"], only.sheets
+    assert not any("3. 근로자" in i.sheet for i in only.issues), [i.line() for i in only.issues]
+    print("  ✓ 한 시트 2표 · 계층 헤더 · B열 합계 · 순번만 있는 행 · 표 선택")
+
+
 def test_stage2_parallel(tmp: Path):
     """2단계는 파일 간 병렬로 돌고, 한 파일의 실패가 다른 파일을 오염시키지 않는다.
 
@@ -394,7 +490,7 @@ def main() -> int:
         for fn in (test_structure_and_stage1, test_clean_file_and_gating,
                    test_rules_and_masking, test_synthesis_modes,
                    test_image_anchor_relocation, test_real_form_structure,
-                   test_stage2_parallel,
+                   test_stacked_tables_and_tiered_header, test_stage2_parallel,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
