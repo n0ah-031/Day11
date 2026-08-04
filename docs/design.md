@@ -2,10 +2,10 @@
 
 | 항목 | 내용 |
 |---|---|
-| 문서 버전 | v1.0 |
+| 문서 버전 | v1.1 |
 | 작성일 | 2026-07-21 |
 | 기준 PRD | 취합앱_PRD_v1.3.md |
-| 상태 | 초안 (User 리뷰 대기) |
+| 상태 | 초안 (User 리뷰 대기) · **v1.1에서 구현과 어긋난 데이터 모델 3건 수정(PRD v2.0 기준)** |
 | 목적 | PRD v1.3에서 design.md 단계로 위임한 상세 아키텍처·데이터모델·API·화면별 UI/인터랙션 명세, 그리고 잔여 리스크 노트 2건(모드 C 그룹 매핑 관리 방식, 모드 D 요약 지표 정의 방식)의 확정 결과를 기록 |
 
 ---
@@ -67,8 +67,8 @@ PRD는 로그인 ID로 **사번**을 요구하지만 Supabase Auth는 기본적�
 |---|---|---|
 | `profiles` | id(=auth.users.id), employee_no(unique), reset_email, role(user/admin), status(active/suspended), created_at | Supabase Auth 사용자와 1:1, 사번↔가상이메일 매핑 |
 | `projects` | id, owner_id, name, created_at | 양식 생성 1건 = 프로젝트 1개. 양식·작성기준·취합 작업이 귀속되는 단위 |
-| `form_templates` | id, project_id, spec_json, file_url, created_at | F1 결과물(문답형으로 확정된 스펙 + 생성된 hwpx/xlsx) |
-| `field_rules` | id, form_template_id, field_name, rule_type(date/name/amount/dept_code), rule_config_json | 필드별 작성 기준(F1-5), F2-5 전처리에서 참조 |
+| `form_templates` | id, project_id, intake_session_id, spec_json, workbook_json, file_url, **source(ai_generated/recognized_external)**, status(generating/done/failed), version, output_format, error_message, created_at, updated_at | F1 결과물(문답형으로 확정된 스펙 + 생성된 xlsx) **및 F6로 등록된 외부 양식**. **(v1.1 추가)** `source`가 둘을 가른다 — 등록 양식은 원본 파일이 산출물이라 `workbook_json`이 NULL인 것이 정상이고 재저작(F1-7) 대상이 아니다(PRD 결정 로그 #20). `version`은 F1-7 수정 시 올라가고 파일은 버전별 경로로 보관한다 |
+| `field_rules` | id, form_template_id, field_name, rule_type(**text/number/amount/date/name/dept_code — 6종**), rule_config_json | 필드별 작성 기준(F1-5), F2-5 전처리에서 참조. **(v1.1 수정)** 초기 스케치의 4종(date/name/amount/dept_code)은 실무 양식에서 가장 흔한 `text`·`number`를 담을 수 없다 — 생성기능_기술명세_v0.1.md §3.4가 정한 6종이 맞다. 실제로 이 어휘가 DB check 제약과 어긋나 있는 동안 F1 양식 생성이 전부 실패했다(값을 4종으로 뭉개면 부서명·사번·과정명·비고를 모두 `name`으로 적는 셈이 된다) |
 | `uploaded_files` | id, project_id, uploader_id, storage_path, original_name, kind(excel/hwpx), status, created_at | 업로드 파일 메타(바이너리는 Storage) |
 | `review_results` | id, file_id, badge(정상/경고/오류), issue_count, issues_json | F2-2~F2-3 검토 결과. `issues_json`은 유형/건수/위치/사유 배열 |
 | `group_mappings` | id, project_id, sheet_name, group_name | **모드 C 확정**: 화면 UI로 관리, 프로젝트 단위로 저장·재사용 |
@@ -76,7 +76,7 @@ PRD는 로그인 ID로 **사번**을 요구하지만 Supabase Auth는 기본적�
 | `audit_logs` | id, actor_id, action, target, created_at | Admin 접근 로그 및 전체 사용 로그(§6.2) |
 | `retention_policy` | key, value(기본 90일), updated_by | Admin이 변경 가능한 보관 정책(F4-3) |
 
-**보관/삭제**: `uploaded_files`와 `aggregation_jobs.result_url`이 가리키는 Storage 객체는 `retention_policy` 기준(기본 90일) 경과 시 정리 배치(Supabase `pg_cron` 스케줄 함수)로 삭제하고 메타 행은 소프트 삭제(`deleted_at`) 처리. hwpx 병합용 임시 파일은 작업 완료 즉시(동기적으로) 삭제.
+**보관/삭제**: `uploaded_files`와 `aggregation_jobs.result_url`이 가리키는 Storage 객체는 `retention_policy` 기준(기본 90일) 경과 시 정리한다. **(v1.1 수정)** 정리 주체는 Supabase `pg_cron` 스케줄 함수가 아니라 **백엔드의 정리 수단(Admin 화면 실행 + CLI)**이다 — 지우기 전에 대상 건수·용량을 보여주기 위해서이고, 주기 실행은 운영 측 cron이 CLI를 호출한다(PRD 결정 로그 #30). 메타 행은 소프트 삭제가 아니라 프로젝트 단위로 실제 삭제하며(CASCADE), **양식(`form_templates`)이 있는 프로젝트는 대상에서 제외한다** — 양식은 다시 쓰는 자산이다. hwpx 병합용 임시 파일은 세션 만료 시 정리한다.
 
 ---
 
@@ -90,14 +90,14 @@ PRD는 로그인 ID로 **사번**을 요구하지만 Supabase Auth는 기본적�
 - 매 턴: 프론트가 사용자 응답을 백엔드로 전달 → 백엔드가 누적 `spec_json` + 최신 응답을 OpenAI 어댑터에 전달 → 다음 질문 또는 완료 판정을 받아 프론트에 반환.
 - 프론트는 우측 패널에 `spec_json`을 필드별 카드로 실시간 렌더링. `SPEC_COMPLETE` 전에는 생성 버튼 비활성.
 - 완료 후 OpenAI에 최종 spec으로 xlsx/hwpx 렌더링을 요청, 결과를 `form_templates` + `field_rules`로 저장.
-- 대화형 수정(F1-7)은 생성 완료 후 별도 턴으로, 기존 `form_template`을 갱신.
-- 문서 파일 첨부(F1-3)는 `INTAKE` 단계에서 컨텍스트로만 사용, 별도 저장은 하지 않음(양식 생성 참고 자료일 뿐 이력 관리 대상 아님).
+- 대화형 수정(F1-7)은 생성 완료 후 별도 턴으로, 기존 `form_template`을 갱신. **(v1.1 구체화)** 셀 단위 패치가 아니라 **사양을 고쳐 다시 저작**하고 `version`을 올린다(PRD 결정 로그 #29). 등록 양식(`source=recognized_external`)은 대상이 아니다.
+- 문서 파일 첨부(F1-3)는 `INTAKE` 단계에서 컨텍스트로 사용한다. **(v1.1 수정)** 첨부는 저장한다 — F6 인지가 **그 파일을 그대로 등록 대상으로 삼기 때문**이다(무변경 등록). 첨부 메타·구조 추출 결과는 `intake_sessions.attachments_json`에 두고 파일은 Storage에 둔다.
 
 ### 4.2 F2. 엑셀 취합
 
 파이프라인: 업로드 → 구조 인식 → 검토 → 배지 산정 → 사용자 범위 선택 → 전처리 → 합성(A/B/C/D) → 다운로드
 
-- **검토/배지 산정**: PRD F2-3 확정 기준표(오류=적색/필수값누락·키충돌·구조불일치, 경고=황색/자동변환가능·완전중복·비필수누락, 정보=회색/자동수정내역)를 규칙 엔진으로 그대로 구현. `field_rules`가 있으면 그 기준으로, 없으면 사용자가 그 자리에서 기준을 지정(F2-5).
+- **검토/배지 산정**: PRD F2-3 확정 기준표(오류=적색/필수값누락·키충돌·구조불일치, 경고=황색/자동변환가능·완전중복·비필수누락, 정보=회색/자동수정내역)를 규칙 엔진으로 그대로 구현. `field_rules`가 있으면 그 기준으로, 없으면 사용자가 그 자리에서 기준을 지정(F2-5). **(v1.1 명시)** 이때 참조하는 양식은 F1이 생성한 것과 F6로 등록된 것을 구분하지 않는다 — 두 경로가 같은 `form_templates`/`field_rules`에 저장되기 때문이다(F6-6).
 - **범위 선택**: 기본 체크 상태(오류=해제, 정상/경고=체크)는 서버가 `review_results.badge`로 계산해 내려주고, 체크박스 토글은 프론트 상태로 처리 후 취합 실행 요청 시점에만 `included_file_ids`로 서버에 전달(매 클릭마다 서버 호출하지 않음).
 - **합성 모드**:
   - A(원본 보존형)·B(시트명 통합형): 추가 입력 없이 바로 실행.
