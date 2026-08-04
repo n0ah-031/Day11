@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Body, Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -24,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 import aggregate as ag
 import auth
+import formgen as fg
 import hwpx_merge as hm
 import store
 
@@ -539,6 +541,197 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
         return payload
 
     return _start_job(work, user["id"])
+
+
+# ── F1 AI 양식 생성 ───────────────────────────────────────────────────────────
+# 문답 상태는 F2·F3 세션과 달리 DB(intake_sessions)에 둔다. 업로드 파일은 Storage에
+# 남아 다시 시작할 수 있지만, 여러 턴에 걸쳐 사용자가 답한 내용은 되살릴 근거가 없다.
+
+def _require_consent(user: dict) -> None:
+    """AI 전송 동의 없이는 F1을 쓸 수 없다 (명세 §9.1). 입력이 외부 API로 나간다."""
+    if _auth_disabled() or not user.get("id"):
+        return
+    if not store.ai_consented(user["id"]):
+        raise HTTPException(403, "AI_CONSENT_REQUIRED")
+
+
+def _form_store_ready(user: dict) -> bool:
+    return bool(store.enabled() and user.get("id"))
+
+
+def _my_session(sid: str, user: dict) -> dict:
+    """세션을 소유자 확인과 함께 가져온다. 남의 것은 존재를 알리지 않는다 (§6.2).
+
+    Supabase를 못 쓰는 상태에서는 조회 자체가 성립하지 않는다. 여기서 막지 않으면
+    REST 오류가 500으로 새어나간다.
+    """
+    if not _form_store_ready(user):
+        raise HTTPException(404, "문답을 찾을 수 없습니다.")
+    session = store.get_intake_session(sid)
+    if session is None:
+        raise HTTPException(404, "문답을 찾을 수 없습니다.")
+    if user.get("id") and store.owner_of_project(session["project_id"]) != user["id"]:
+        raise HTTPException(404, "문답을 찾을 수 없습니다.")
+    return session
+
+
+@app.post("/api/form/consent")
+def form_consent(user: dict = User) -> dict:
+    if not _auth_disabled() and user.get("id"):
+        store.set_ai_consent(user["id"])
+        store.log_action(user["id"], "AI 전송 동의", "")
+    return {"ok": True}
+
+
+@app.get("/api/form/consent")
+def form_consent_state(user: dict = User) -> dict:
+    if _auth_disabled() or not user.get("id"):
+        return {"consented": True}
+    return {"consented": store.ai_consented(user["id"])}
+
+
+# 리터럴 경로는 /api/form/{sid} 보다 먼저 선언해야 한다. 뒤에 두면 FastAPI가
+# /api/form/templates 를 sid="templates" 로 잡아 404를 돌려준다(실제로 그랬다).
+@app.get("/api/form/templates")
+def form_templates(user: dict = User) -> dict:
+    """생성해 둔 양식 목록. 취합 화면에서 작성기준을 고르는 재료다 (F1-6)."""
+    if not store.enabled() or not user.get("id"):
+        return {"templates": []}
+    return {"templates": store.list_form_templates(user["id"])}
+
+
+@app.get("/api/form/templates/{template_id}/rules")
+def form_template_rules(template_id: str, user: dict = User) -> dict:
+    """양식의 작성기준을 취합이 그대로 쓰는 형태로 돌려준다."""
+    if not store.enabled() or not user.get("id"):
+        raise HTTPException(404, "작성기준을 찾을 수 없습니다.")
+    rules = store.rules_of_template(user["id"], template_id)
+    if rules is None:
+        raise HTTPException(404, "작성기준을 찾을 수 없습니다.")
+    return {"rules": rules}
+
+
+@app.post("/api/form/session")
+def form_session(body: dict = Body(...), user: dict = User) -> dict:
+    """F1-1 첫 프롬프트. 프로젝트와 문답 세션을 만들고 첫 턴을 돌린다."""
+    _require_consent(user)
+    message = (body or {}).get("message", "").strip()
+    if not message:
+        raise HTTPException(400, "어떤 양식이 필요한지 알려주세요.")
+    if not store.enabled() or not user.get("id"):
+        # 생성한 양식과 작성기준이 남지 않으면 배포·취합으로 이어질 수 없다
+        raise HTTPException(503, "양식 생성은 Supabase 설정이 필요합니다.")
+
+    project_id = store.create_project(user["id"], "AI 양식 생성")
+    session = store.create_intake_session(project_id, {"role": "user", "content": message})
+    return {"session_id": session["id"], "project_id": project_id} | _turn(session, user)
+
+
+@app.post("/api/form/{sid}/messages")
+def form_message(sid: str, body: dict = Body(...), user: dict = User) -> dict:
+    """F1-2 문답 한 턴. 사양이 바뀌면 완료 판정도 다시 한다."""
+    _require_consent(user)
+    session = _my_session(sid, user)
+    message = (body or {}).get("message", "").strip()
+    if not message:
+        raise HTTPException(400, "답변을 입력해주세요.")
+    if session["status"] == "closed":
+        raise HTTPException(400, "이미 생성이 끝난 문답입니다. 새로 시작해주세요.")
+    session["messages_json"] = list(session["messages_json"]) + [{"role": "user", "content": message}]
+    return _turn(session, user)
+
+
+def _turn(session: dict, user: dict) -> dict:
+    """LLM 한 턴을 돌리고 세션에 반영한다. 저장은 원문, 마스킹은 전송 때만(§9.2)."""
+    model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+    try:
+        out = fg.intake_turn(session["messages_json"], session.get("spec_json") or {}, model)
+    except fg.FormGenError as exc:
+        # AI가 기능 자체라 건너뛸 수 없다. 사유를 그대로 전달한다(§9.4)
+        raise HTTPException(503, str(exc))
+
+    messages = list(session["messages_json"]) + [{"role": "assistant", "content": out["reply"]}]
+    store.update_intake_session(
+        session["id"], messages_json=messages, spec_json=out["spec_json"],
+        turn_count=out["turn"], status="spec_complete" if out["spec_complete"] else "active")
+    return {"reply": out["reply"], "spec_json": out["spec_json"],
+            "spec_complete": out["spec_complete"], "coverage": out["coverage"],
+            "gaps": out["gaps"], "messages": messages}
+
+
+@app.get("/api/form/{sid}")
+def form_session_state(sid: str, user: dict = User) -> dict:
+    """새로고침·재진입 복원용."""
+    session = _my_session(sid, user)
+    return {"session_id": session["id"], "project_id": session["project_id"],
+            "status": session["status"], "messages": session["messages_json"],
+            "spec_json": session["spec_json"], "turn_count": session["turn_count"],
+            "spec_complete": session["status"] == "spec_complete"}
+
+
+@app.post("/api/form/{sid}/generate")
+def form_generate(sid: str, user: dict = User) -> dict:
+    """F1-4 양식 파일 생성. 저작·검증·변환을 잡으로 넘긴다."""
+    _require_consent(user)
+    session = _my_session(sid, user)
+    spec = session.get("spec_json") or {}
+    gaps = fg.rubric_gaps(spec)
+    if gaps:
+        # 화면의 생성 버튼은 서버 판정으로만 켜지지만, 직접 호출도 막는다
+        raise HTTPException(400, "사양이 아직 확정되지 않았습니다: " + ", ".join(gaps[:5]))
+
+    template_id = store.create_form_template(session["project_id"], session["id"], spec)
+    model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+    tmp = Path(tempfile.mkdtemp(prefix="form-"))
+
+    def work(report):
+        report("양식 내용을 저작하는 중", 0, 3)
+        try:
+            wb = fg.author_workbook(spec, model,
+                                    on_retry=lambda n, p: report(f"검증 미통과 → 재저작 {n}회차", 1, 3))
+            report("파일로 만드는 중", 2, 3)
+            out = tmp / "form.xlsx"
+            notes = fg.materialize(wb, out)
+            file_url = store.put_form(session["project_id"], template_id, out)
+            store.finish_form_template(template_id, wb, file_url)
+            store.save_field_rules(template_id, fg.derive_field_rules(spec))
+            store.update_intake_session(session["id"], status="closed")
+            store.log_action(user.get("id"), "양식 생성 완료",
+                            f"{spec.get('form_title')} · 항목 {len(spec.get('fields') or [])}개")
+        except fg.FormGenError as exc:
+            store.fail_form_template(template_id, str(exc))
+            raise HTTPException(503, str(exc))
+        except Exception as exc:
+            store.fail_form_template(template_id, f"{type(exc).__name__}: {exc}")
+            raise
+        report("생성 완료", 3, 3)
+        return {
+            "template_id": template_id,
+            "form_title": spec.get("form_title"),
+            "sheets": [{"name": s.get("name"),
+                        "cells": [{"ref": c.get("ref"), "value": c.get("value")}
+                                  for c in (s.get("cells") or [])]}
+                       for s in wb["sheets"]],
+            "rules": fg.rules_for_aggregate(spec),
+            "notes": notes,
+        }
+
+    return _start_job(work, user["id"])
+
+
+@app.get("/api/form/template/{template_id}/download")
+def form_download(template_id: str, user: dict = User):
+    if not _form_store_ready(user):
+        raise HTTPException(404, "양식 파일이 없습니다.")
+    row = store.get_form_template(template_id)
+    if row is None or not row.get("file_url"):
+        raise HTTPException(404, "양식 파일이 없습니다.")
+    if user.get("id") and store.owner_of_project(row["project_id"]) != user["id"]:
+        raise HTTPException(404, "양식 파일이 없습니다.")
+    data = store.get_object(store.RESULT_BUCKET, row["file_url"])
+    title = (row.get("spec_json") or {}).get("form_title") or "form"
+    return Response(content=data, media_type=XLSX_MIME, headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(title)}.xlsx"})
 
 
 # ── F3 한글(hwpx) 병합 ────────────────────────────────────────────────────────

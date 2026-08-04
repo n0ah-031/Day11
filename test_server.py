@@ -91,6 +91,28 @@ def hwpx_session() -> str:
     return res.json()["sid"]
 
 
+def test_form_requires_store():
+    """양식 생성은 기록이 남아야 의미가 있다 — Supabase 없이는 503으로 닫는다.
+
+    LLM 호출은 하지 않는다(설정 검사에서 먼저 막힌다). AUTH_DISABLED로 도는 이 파일에서는
+    user['id']가 없으므로 여기까지만 확인하고, 실제 흐름은 test_auth.py가 검증한다.
+    """
+    res = client.post("/api/form/session", json={"message": "예산 양식 만들어줘"})
+    assert res.status_code == 503, res.text
+    assert "Supabase" in res.json()["detail"], res.text
+
+    # 빈 요청은 LLM을 부르기 전에 400으로 거른다
+    assert client.post("/api/form/session", json={"message": "  "}).status_code == 400
+    # 없는 문답은 존재를 알리지 않는다
+    assert client.post("/api/form/없는세션/messages", json={"message": "x"}).status_code == 404
+    assert client.get("/api/form/없는세션").status_code == 404
+    assert client.get("/api/form/template/없는것/download").status_code == 404
+    # 인증이 꺼져 있으면 동의는 통과 상태로 본다(로컬 개발)
+    assert client.get("/api/form/consent").json() == {"consented": True}
+    assert client.get("/api/form/templates").json() == {"templates": []}
+    print("  ✓ 양식 생성 사전 조건(Supabase 미설정 503 / 빈 요청 400 / 없는 문답 404)")
+
+
 def test_hwpx_end_to_end():
     """한글 병합: 업로드 → 드래그 순서(역순)로 병합 → hwpx 다운로드."""
     import zipfile
@@ -327,7 +349,8 @@ def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
     for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
                test_optional_columns, test_dept_names, test_job_progress,
-               test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep):
+               test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,
+               test_form_requires_store):
         fn()
     print("\n전체 통과")
     return 0

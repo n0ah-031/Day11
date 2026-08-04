@@ -317,3 +317,110 @@ def list_logs(q: str = "", limit: int = 200) -> list[dict]:
                 if needle in r["action"].lower() or needle in (r["target"] or "").lower()
                 or needle in r["actor"].lower()]
     return rows
+
+
+# ── F1 양식 생성 (문답 세션 · 템플릿 · 작성기준) ───────────────────────────────
+FORM_BUCKET = RESULT_BUCKET       # 생성된 양식도 results 버킷에 둔다(버킷을 늘리지 않는다)
+
+
+def create_intake_session(project_id: str, first_message: dict) -> dict:
+    """문답 세션을 시작한다. 프로젝트당 active 세션은 하나뿐이다(부분 유니크 인덱스)."""
+    return _insert("intake_sessions", {
+        "project_id": project_id, "status": "active",
+        "messages_json": [first_message], "spec_json": {}, "turn_count": 0,
+    })
+
+
+def get_intake_session(session_id: str) -> dict | None:
+    rows = _rest("GET", "/intake_sessions", params={"id": f"eq.{session_id}", "select": "*"}).json()
+    return rows[0] if rows else None
+
+
+def update_intake_session(session_id: str, **fields) -> None:
+    if fields:
+        fields.setdefault("updated_at", "now()")
+        _rest("PATCH", "/intake_sessions", params={"id": f"eq.{session_id}"}, json=fields)
+
+
+def owner_of_project(project_id: str) -> str | None:
+    """프로젝트 소유자. 세션·템플릿 접근을 소유자로 스코핑하기 위해 쓴다 (§6.2)."""
+    rows = _rest("GET", "/projects",
+                 params={"id": f"eq.{project_id}", "select": "owner_id"}).json()
+    return rows[0]["owner_id"] if rows else None
+
+
+def create_form_template(project_id: str, session_id: str, spec: dict) -> str:
+    return _insert("form_templates", {
+        "project_id": project_id, "intake_session_id": session_id,
+        "spec_json": spec, "status": "generating", "version": 1, "output_format": "xlsx",
+    })["id"]
+
+
+def finish_form_template(template_id: str, workbook: dict, file_url: str) -> None:
+    _rest("PATCH", "/form_templates", params={"id": f"eq.{template_id}"},
+          json={"status": "done", "workbook_json": workbook, "file_url": file_url,
+                "updated_at": "now()"})
+
+
+def fail_form_template(template_id: str, reason: str) -> None:
+    _rest("PATCH", "/form_templates", params={"id": f"eq.{template_id}"},
+          json={"status": "failed", "error_message": reason[:500], "updated_at": "now()"})
+
+
+def get_form_template(template_id: str) -> dict | None:
+    rows = _rest("GET", "/form_templates", params={"id": f"eq.{template_id}", "select": "*"}).json()
+    return rows[0] if rows else None
+
+
+def put_form(project_id: str, template_id: str, local_path: Path, version: int = 1) -> str:
+    """생성된 양식을 Storage에 올린다. 버전별 경로로 남겨 과거 버전이 덮이지 않게 한다."""
+    path = f"forms/{project_id}/{template_id}_v{version}.xlsx"
+    _put_object(RESULT_BUCKET, path, local_path.read_bytes(), XLSX_MIME)
+    return path
+
+
+def save_field_rules(template_id: str, rows: list[dict]) -> None:
+    """spec에서 파생한 작성기준을 갈아끼운다(F1-5). 재생성 시 이전 것을 남기지 않는다."""
+    _rest("DELETE", "/field_rules", params={"form_template_id": f"eq.{template_id}"})
+    for row in rows:
+        _insert("field_rules", {"form_template_id": template_id, **row})
+
+
+def list_form_templates(owner_id: str, limit: int = 100) -> list[dict]:
+    """본인이 만든 양식 목록. 취합 화면에서 작성기준을 고르는 재료다 (F1-6)."""
+    res = _rest("GET", "/form_templates", params={
+        "select": "id,project_id,status,version,spec_json,file_url,created_at,"
+                  "projects!inner(owner_id,name)",
+        "projects.owner_id": f"eq.{owner_id}", "status": "eq.done",
+        "order": "created_at.desc", "limit": str(limit)})
+    out = []
+    for row in res.json():
+        spec = row.get("spec_json") or {}
+        out.append({
+            "id": row["id"], "project_id": row["project_id"], "version": row["version"],
+            "created_at": row["created_at"], "file_url": row.get("file_url"),
+            "title": spec.get("form_title") or (row.get("projects") or {}).get("name") or "양식",
+            "field_count": len(spec.get("fields") or []),
+        })
+    return out
+
+
+def rules_of_template(owner_id: str, template_id: str) -> dict | None:
+    """양식의 작성기준을 취합 엔진이 먹는 형태로 돌려준다. 남의 것은 None."""
+    rows = _rest("GET", "/form_templates", params={
+        "id": f"eq.{template_id}", "select": "spec_json,projects!inner(owner_id)",
+        "projects.owner_id": f"eq.{owner_id}"}).json()
+    if not rows:
+        return None
+    import formgen as fg
+    return fg.rules_for_aggregate(rows[0].get("spec_json") or {})
+
+
+def set_ai_consent(user_id: str) -> None:
+    _rest("PATCH", "/profiles", params={"id": f"eq.{user_id}"}, json={"ai_consent_at": "now()"})
+
+
+def ai_consented(user_id: str) -> bool:
+    rows = _rest("GET", "/profiles",
+                 params={"id": f"eq.{user_id}", "select": "ai_consent_at"}).json()
+    return bool(rows and rows[0].get("ai_consent_at"))

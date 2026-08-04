@@ -176,8 +176,8 @@
 <div class="text-headline-lg font-headline-lg font-bold text-primary tracking-tight">취합</div>
 <div class="flex items-center gap-4">
 <nav class="hidden md:flex items-center gap-8">
-<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="#">이력</a>
-<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="#">관리자 콘솔</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="history.html">이력</a>
+<a id="nav-admin" href="admin.html" class="hidden px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-label-sm font-label-sm text-primary hover:bg-primary/20 transition-colors">관리자 콘솔</a>
 <button class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
 </nav>
 <!-- 라이트/다크 전환 토글 (모바일에서도 항상 노출) -->
@@ -203,7 +203,7 @@
 <p class="text-body-sm font-body-sm text-on-surface-variant">문서 생성 및 관리</p>
 </div>
 <nav class="flex flex-col gap-3">
-<a class="flex items-center gap-3 px-5 py-4 bg-primary-container/40 dark:bg-primary/10 text-primary border border-primary/20 rounded-xl transition-all shadow-soft" href="#">
+<a class="flex items-center gap-3 px-5 py-4 bg-primary-container/40 dark:bg-primary/10 text-primary border border-primary/20 rounded-xl transition-all shadow-soft" href="create.html">
 <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">add_circle</span>
 <span class="text-label-md font-label-md font-semibold">생성</span>
 </a>
@@ -336,6 +336,21 @@
     if (chip.id === 'theme-toggle') return;
     chip.addEventListener('click', () => { input.value = chip.innerText.trim(); input.focus(); });
   });
+
+  // 프롬프트를 넣으면 화면 3(양식 생성)으로 넘긴다 (design.md 화면 2 → 화면 3, F1-1)
+  const goCreate = () => {
+    const v = input.value.trim();
+    if (v) location.href = 'create.html?q=' + encodeURIComponent(v);
+  };
+  sendBtn.addEventListener('click', goCreate);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') goCreate(); });
+
+  // 관리자 콘솔 링크는 관리자에게만 드러낸다 (다른 화면의 nav-admin 규칙과 동일)
+  fetch('/api/auth/me').then((r) => r.ok ? r.json() : null).then((me) => {
+    if (me && me.profile && me.profile.role === 'admin') {
+      document.getElementById('nav-admin').classList.remove('hidden');
+    }
+  }).catch(() => {});
 </script>
 </body>
 </html>
