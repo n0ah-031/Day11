@@ -373,8 +373,14 @@ def get_form_template(template_id: str) -> dict | None:
 
 
 def put_form(project_id: str, template_id: str, local_path: Path, version: int = 1) -> str:
-    """생성된 양식을 Storage에 올린다. 버전별 경로로 남겨 과거 버전이 덮이지 않게 한다."""
-    path = f"forms/{project_id}/{template_id}_v{version}.xlsx"
+    """생성된 양식을 Storage에 올린다. 버전별 경로로 남겨 과거 버전이 덮이지 않게 한다.
+
+    경로는 프로젝트 폴더 **바로 아래 평면**이어야 한다. 정리 코드(`delete_account` →
+    `_empty_folder`)는 `{project_id}/`를 훑어 나온 객체만 지우는데, 목록 API는 한 단계
+    아래 폴더를 객체가 아닌 항목으로 돌려준다. 종전 `forms/{project_id}/...`는 두 가지가
+    다 어긋나 있어서 계정을 지워도 생성한 양식이 Storage에 그대로 남았다.
+    """
+    path = f"{project_id}/form_{template_id}_v{version}.xlsx"
     _put_object(RESULT_BUCKET, path, local_path.read_bytes(), XLSX_MIME)
     return path
 

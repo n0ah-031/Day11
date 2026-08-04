@@ -152,6 +152,11 @@ def _ask(system: str, payload: str, model: str, client=None) -> dict:
                       {"role": "user", "content": payload}],
         )
         text = res.choices[0].message.content
+        # 유료 호출이라 사용량을 남긴다. 스텁 클라이언트에는 usage가 없다.
+        usage = getattr(res, "usage", None)
+        if usage is not None:
+            print(f"[formgen] {model} 토큰 in={usage.prompt_tokens} "
+                  f"out={usage.completion_tokens} total={usage.total_tokens}", file=sys.stderr)
     except FormGenError:
         raise
     except Exception as exc:
@@ -228,7 +233,9 @@ def intake_turn(messages: list[dict], spec: dict, model: str,
         "spec_complete": complete,
         "coverage": coverage,
         "gaps": gaps,
-        "turn": turn + 1,
+        # 지금 처리한 턴까지의 개수. `turn+1`은 아직 오지 않은 턴을 세는 셈이라
+        # intake_sessions.turn_count가 실제보다 1 많게 남았다(6턴 문답이 7로 기록).
+        "turn": turn,
     }
 
 

@@ -355,6 +355,159 @@ def test_hwpx_persistence(client: TestClient):
     print("  ✓ 한글 병합 영속화 + 이력 유형 필터(엑셀/한글 구분)")
 
 
+def _form_spec() -> dict:
+    """모든 자료 유형을 한 번에 쓰는 사양.
+
+    유형을 골고루 넣는 이유는 field_rules.rule_type 제약이 formgen.FIELD_TYPES보다
+    좁으면 저장이 23514로 죽기 때문이다. 실제로 그랬다 — 베이스라인 제약이 4종만
+    허용해 text·number를 쓰는 양식(즉 대부분)이 전부 실패했다.
+    """
+    import formgen as fg
+    fields = []
+    for t in fg.FIELD_TYPES:
+        f = {"name": f"항목-{t}", "type": t, "required": t != "text", "notes": None}
+        # date·amount는 입력 형식이 없으면 완결성 루브릭이 사양을 미완으로 본다
+        f["format"] = "YYYY-MM-DD" if t == "date" else ("숫자만" if t == "amount" else None)
+        fields.append(f)
+    return {"form_title": "zz-test 전 유형 양식", "fields": fields, "locale": "ko"}
+
+
+def _form_workbook(spec: dict) -> dict:
+    """사양대로 머리행만 있는 최소 저작물. 검증 관문을 통과하는 형태여야 한다."""
+    cells = [{"ref": "A1", "value": spec["form_title"], "style": "title"}]
+    for i, f in enumerate(spec["fields"]):
+        cells.append({"ref": f"{chr(ord('A') + i)}3",
+                      "value": f["name"] + ("*" if f["required"] else ""), "style": "header"})
+    return {"sheets": [{
+        "name": "양식", "freeze_panes": "A4",
+        "styles": {"title": {"bold": True, "size": 14}, "header": {"bold": True, "bg": "EEF2FF"}},
+        "cells": cells,
+    }]}
+
+
+def test_form_persistence(client: TestClient):
+    """F1 문답·양식·작성기준·동의가 DB에 남고, 남의 것은 보이지 않아야 한다.
+
+    LLM만 스텁으로 바꾸고 **store는 실제 Supabase를 탄다** — 스텁 store로는 스키마
+    제약을 지나가지 않아 test_formgen.py가 못 잡는 지점이 여기다.
+    """
+    import store
+    import formgen as fg
+    from test_formgen import Stub
+
+    spec = _form_spec()
+    real_client = fg._client
+    # 인스턴스는 하나만 둔다 — 호출마다 새로 만들면 매번 첫 응답만 돌려준다
+    stub = Stub([
+        # 1턴: LLM이 완료를 선언해도 사양이 비어 있으면 완료로 인정하지 않는다
+        {"reply": "어떤 항목이 필요하신가요?", "spec_json": {"form_title": spec["form_title"]},
+         "spec_complete": True},
+        # 2턴: 사양 확정
+        {"reply": "사양을 확정했습니다.", "spec_json": spec, "spec_complete": True},
+        # 저작
+        _form_workbook(spec),
+    ])
+    fg._client = lambda: stub
+    try:
+        # 동의 전에는 F1 전체가 403이어야 한다 (명세 §9.1)
+        assert client.get("/api/form/consent").json()["consented"] is False
+        blocked = client.post("/api/form/session", json={"message": "양식 만들어줘"})
+        assert blocked.status_code == 403 and blocked.json()["detail"] == "AI_CONSENT_REQUIRED", \
+            (blocked.status_code, blocked.text[:200])
+
+        assert client.post("/api/form/consent").status_code == 200
+        assert client.get("/api/form/consent").json()["consented"] is True
+        me = client.get("/api/auth/me").json()["profile"]["id"]
+        rows = store._rest("GET", "/profiles",
+                           params={"id": f"eq.{me}", "select": "ai_consent_at"}).json()
+        assert rows[0]["ai_consent_at"], "동의 시각이 남아야 한다"
+
+        # 1턴 — 완결성 가드가 성급한 완료 선언을 꺾는지
+        first = client.post("/api/form/session", json={"message": "전 유형 양식 만들어줘"})
+        assert first.status_code == 200, first.text
+        made = first.json()
+        sid, project_id = made["session_id"], made["project_id"]
+        assert made["spec_complete"] is False and "포함할 항목" in made["gaps"], made
+
+        # 2턴 — 사양 확정. 문답 원문이 DB에 누적돼야 한다
+        second = client.post(f"/api/form/{sid}/messages", json={"message": "전 유형 다 넣어주세요"})
+        assert second.status_code == 200, second.text
+        assert second.json()["spec_complete"] is True, second.json()
+        saved = store.get_intake_session(sid)
+        assert saved["status"] == "spec_complete" and saved["turn_count"] == 2, saved
+        assert [m["role"] for m in saved["messages_json"]] == \
+            ["user", "assistant", "user", "assistant"], saved["messages_json"]
+        assert saved["spec_json"]["form_title"] == spec["form_title"], saved["spec_json"]
+
+        # 생성 — 양식 파일·작성기준·상태가 남아야 한다
+        out = wait(client.post(f"/api/form/{sid}/generate"))
+        template_id = out["template_id"]
+        row = store.get_form_template(template_id)
+        assert row["status"] == "done" and row["error_message"] is None, row
+        assert row["version"] == 1 and row["output_format"] == "xlsx", row
+        assert row["intake_session_id"] == sid, row
+        assert row["workbook_json"]["sheets"][0]["name"] == "양식", row["workbook_json"]
+        assert store.get_intake_session(sid)["status"] == "closed", "생성 후 문답은 닫힌다"
+
+        # 생성물이 Storage에 실제로 있는지
+        assert _object_of(store.RESULT_BUCKET, row["file_url"])[:2] == b"PK", row["file_url"]
+        # 계정 삭제 시 정리되는 자리에 있어야 한다 — 프로젝트 폴더 바로 아래, 평면.
+        # 종전 forms/{project_id}/... 는 정리를 빠져나가 계정을 지워도 남았다.
+        assert row["file_url"].startswith(f"{project_id}/"), row["file_url"]
+        assert "/" not in row["file_url"][len(project_id) + 1:], row["file_url"]
+
+        # 작성기준 — rule_type이 formgen의 어휘 전부를 담을 수 있어야 한다
+        saved_rules = store._rest("GET", "/field_rules",
+                                  params={"form_template_id": f"eq.{template_id}",
+                                          "select": "field_name,rule_type,rule_config_json"}).json()
+        assert {r["rule_type"] for r in saved_rules} == set(fg.FIELD_TYPES), saved_rules
+        text_rule = next(r for r in saved_rules if r["rule_type"] == "text")
+        assert text_rule["rule_config_json"]["required"] is False, text_rule
+
+        # 목록·작성기준 API가 취합이 그대로 먹는 형태로 내려주는지 (F1-6)
+        listed = client.get("/api/form/templates").json()["templates"]
+        mine = next((t for t in listed if t["id"] == template_id), None)
+        assert mine and mine["field_count"] == len(spec["fields"]), listed
+        rules = client.get(f"/api/form/templates/{template_id}/rules").json()["rules"]
+        assert rules["항목-text"] == {"required": False}, rules
+        assert all("key" not in v for v in rules.values()), "키 컬럼은 지어내지 않는다"
+
+        dl = client.get(f"/api/form/template/{template_id}/download")
+        assert dl.status_code == 200 and dl.content[:2] == b"PK", dl.status_code
+
+        # 감사 로그에 두 액션이 남았는지
+        # list_logs는 actor_id 대신 사번(actor)을 내려준다(화면이 쓰는 형태)
+        actions = {r["action"] for r in store.list_logs(limit=50) if r["actor"] == EMP}
+        assert {"AI 전송 동의", "양식 생성 완료"} <= actions, actions
+
+        # 남의 문답·양식은 존재 자체를 알리지 않는다 (§6.2)
+        other_emp = f"zz-test-{uuid.uuid4().hex[:10]}"
+        other = TestClient(server.app)
+        other_id = other.post("/api/auth/signup", json={
+            "employee_no": other_emp, "password": PW,
+            "reset_email": RESET_EMAIL}).json()["profile"]["id"]
+        try:
+            assert other.post("/api/auth/login",
+                              json={"employee_no": other_emp, "password": PW}).status_code == 200
+            # 동의 게이트(403)는 위에서 확인했다. 여기서 보려는 것은 격리라 동의를 준다
+            assert other.post("/api/form/consent").status_code == 200
+            for method, path in [("get", f"/api/form/{sid}"),
+                                 ("post", f"/api/form/{sid}/messages"),
+                                 ("get", f"/api/form/templates/{template_id}/rules"),
+                                 ("get", f"/api/form/template/{template_id}/download")]:
+                res = (other.post(path, json={"message": "보여줘"}) if method == "post"
+                       else other.get(path))
+                assert res.status_code == 404, f"{path} → {res.status_code} {res.text[:200]}"
+            assert other.get("/api/form/templates").json()["templates"] == []
+        finally:
+            _delete_storage_for_owner(other_id)
+            _delete_user(other_id)
+        print("  ✓ F1 영속화(문답·양식·작성기준·동의 + 양식 격리)")
+        return project_id
+    finally:
+        fg._client = real_client
+
+
 def test_admin_console(client: TestClient):
     """Admin API는 관리자만 쓸 수 있고, 변경은 감사 로그에 남아야 한다 (F4-3)."""
     import manage_users
@@ -479,7 +632,8 @@ def _delete_test_logs() -> None:
     headers = {"apikey": key, "Authorization": f"Bearer {key}",
                "Content-Type": "application/json"}
     base = os.environ["SUPABASE_URL"].rstrip("/")
-    for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료", "한글 병합 완료"):
+    for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료",
+                   "한글 병합 완료", "AI 전송 동의", "양식 생성 완료"):
         httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
                      params={"actor_id": "is.null", "action": f"eq.{action}"})
 
@@ -533,6 +687,7 @@ def main() -> int:
         test_role_and_suspend(client)
         test_persistence(client)
         test_hwpx_persistence(client)
+        test_form_persistence(client)
         test_admin_console(client)
         test_public_key_reads_nothing()
         test_logout(client)
