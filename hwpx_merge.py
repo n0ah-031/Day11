@@ -50,6 +50,12 @@ REFS = {
 # header에 정의가 없어(실측 3파일 확인) 손대지 않는 참조. 옮기면 없는 id를 가리킨다.
 UNTOUCHED = ("outlineShapeIDRef", "memoShapeIDRef", "linkListIDRef", "linkListNextIDRef")
 
+# 우리가 id를 옮길 수 있는 header 컨테이너. 실측 3파일의 refList는 정확히 이 안에 든다
+# (fontfaces·borderFills·charProperties·tabProperties·numberings·paraProperties·styles).
+# 여기에 없는 컨테이너에 항목이 있으면 그 문서의 id는 그대로 남아 남의 정의를 가리킨다 —
+# 메모·개체가 든 문서가 그럴 수 있고, 우리는 그 구조를 실제 파일로 확인하지 못했다.
+KNOWN_BOXES = set(SPACES) | {"fontfaces"}
+
 FONT_LANGS = ("HANGUL", "LATIN", "HANJA", "JAPANESE", "OTHER", "SYMBOL", "USER")
 
 MEDIA = {".jpg": "image/jpg", ".jpeg": "image/jpg", ".png": "image/png",
@@ -292,7 +298,7 @@ def merge(paths: list[Path], out: Path, progress=None) -> dict:
     report["파일"] = [p.name for p in paths]
     report["구역"] = {p.name: len(d["sections"]) for p, d in zip(paths, docs)}
     report["한계"] = _limits(docs)
-    if report["dangling"] or report["itemCnt불일치"] or any(
+    if report["dangling"] or report["itemCnt불일치"] or report["옮길수없는서식"] or any(
             v["원본합계"] != v["병합결과"] for v in report["수량대조"].values()):
         report["결과"] = "실패"
         return report
@@ -343,6 +349,43 @@ def _write(out: Path, header: str, sections: list[str], hpf: str,
 
 
 # -------------------------------------------------------------------- 검증
+
+def _boxes(header: str) -> dict[str, int]:
+    """header `hh:refList`의 직계 컨테이너별 직계 항목 수."""
+    found = _inner(header, "refList")
+    inner = found[0] if found else header
+    out: dict[str, int] = {}
+    depth, box = 0, None
+    for tok in re.finditer(r"<(/?)hh:(\w+)\b[^>]*?(/?)>", inner):
+        closing, name, selfclose = tok.groups()
+        if closing:
+            depth -= 1
+            if depth == 0:
+                box = None
+            continue
+        if depth == 0:
+            box = name
+            out.setdefault(name, 0)
+        elif depth == 1 and box:
+            out[box] += 1
+        if not selfclose:
+            depth += 1
+    return out
+
+
+def _unmergeable(docs: list[dict]) -> list[str]:
+    """id를 옮길 수 없는 서식 정의를 가진 문서. 병합하면 서식이 조용히 섞인다.
+
+    첫 문서의 것은 그대로 남으니 문제가 없다. 2번째 이후 문서가 우리가 모르는 공간에
+    항목을 정의하면, 그 문서의 본문 참조는 첫 문서의 정의를 가리키게 된다.
+    """
+    out = []
+    for d in docs[1:]:
+        for name, count in sorted(_boxes(d["header"]).items()):
+            if name not in KNOWN_BOXES and count:
+                out.append("%s: %s %d개" % (d["path"].name, name, count))
+    return out
+
 
 def _defined(header: str) -> dict[str, set[int]]:
     return {tag: {_own_id(it) for it in _box_items(header, box, tag)}
@@ -397,6 +440,7 @@ def _verify(header: str, sections: list[str], binout: dict, docs: list[dict]) ->
         "dangling": dangling,
         "수량대조": tally,
         "itemCnt불일치": itemcnt,
+        "옮길수없는서식": _unmergeable(docs),
         "고아BinData": sorted(stems - refs),
         "미대응": {a: len(re.findall(r'\b%s="' % a, whole)) for a in UNTOUCHED
                    if re.search(r'\b%s="' % a, whole)},
@@ -448,8 +492,13 @@ def main() -> int:
         print("[고아 BinData]", ", ".join(r["고아BinData"]))
     for l in r["한계"]:
         print("[한계]", l)
+    if r["옮길수없는서식"]:
+        print("[옮길 수 없는 서식] 병합이 id를 옮기지 못하는 정의: "
+              + "; ".join(r["옮길수없는서식"]))
     if r["결과"] != "성공":
         print("\n실패 — 결과 파일을 쓰지 않았습니다.")
+        for d in r["옮길수없는서식"][:20]:
+            print("  ·", d)
         for d in r["dangling"][:20]:
             print("  ·", d)
         if len(r["dangling"]) > 20:

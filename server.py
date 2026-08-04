@@ -810,7 +810,13 @@ def hwpx_merge_start(sid: str, body: dict = Body(default={}), user: dict = User)
             raise HTTPException(400, str(exc))
         if rep["결과"] != "성공":
             # 검증 미통과 — 엔진이 파일을 쓰지 않았다. 깨진 산출물을 내보내지 않는다
-            reason = "; ".join(rep["dangling"][:5]) or "; ".join(rep["itemCnt불일치"][:5])
+            # 사유 후보를 빠뜨리면 사유 없는 실패 메시지가 나간다
+            if rep["옮길수없는서식"]:
+                reason = ("이 문서에는 병합이 옮길 수 없는 서식 정의가 있습니다(메모·개체 등): "
+                          + "; ".join(rep["옮길수없는서식"][:5]))
+            else:
+                reason = "; ".join(rep["dangling"][:5]) or "; ".join(rep["itemCnt불일치"][:5])
+            reason = reason or "수량 대조 불일치"
             if job_id:
                 store.update_job(job_id, status="failed", error_message=reason)
             raise HTTPException(400, f"병합 결과 검증에 실패해 파일을 만들지 않았습니다: {reason}")

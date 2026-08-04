@@ -218,10 +218,134 @@ def test_dangling_blocks_output(tmp: Path) -> None:
     print("  ✓ 해석 불가 참조 시 결과 파일 미작성")
 
 
+# 실제 파일로 확인하지 못한 계열 — 사용자가 예시를 주지 못해 구조를 재현해서 본다.
+# ① 원래 여러 구역인 문서 ② 머리말·꼬리말이 있는 문서 ③ 우리가 모르는 id 공간(메모 등)
+
+SECTION_WITH_HEADER_FOOTER = """<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>\
+<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" \
+xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">\
+<hp:p paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0">\
+<hp:ctrl><hp:colPr/></hp:ctrl>\
+<hp:secPr><hp:pagePr landscape="WIDELY"/>\
+<hp:header applyPageType="BOTH"><hp:subList>\
+<hp:p paraPrIDRef="1" styleIDRef="1"><hp:run charPrIDRef="1"><hp:t>{t} 머리말</hp:t></hp:run></hp:p>\
+</hp:subList></hp:header>\
+<hp:footer applyPageType="BOTH"><hp:subList>\
+<hp:p paraPrIDRef="1" styleIDRef="1"><hp:run charPrIDRef="1"><hp:t>{t} 꼬리말</hp:t></hp:run></hp:p>\
+</hp:subList></hp:footer>\
+</hp:secPr><hp:t>{t}-본문</hp:t></hp:run></hp:p>\
+</hs:sec>"""
+
+HPF_TWO_SECTIONS = HPF.replace(
+    '<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>',
+    '<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>'
+    '<opf:item id="section1" href="Contents/section1.xml" media-type="application/xml"/>'
+).replace(
+    '<opf:itemref idref="section0" linear="yes"/>',
+    '<opf:itemref idref="section0" linear="yes"/><opf:itemref idref="section1" linear="yes"/>')
+
+
+def _fixture2(path: Path, tag: str, *, sections: int = 1,
+              header_footer: bool = False, extra_box: str = "") -> None:
+    """구역 수·머리말·모르는 id 공간을 골라 만드는 fixture."""
+    header = HEADER.format(f="돋움" if tag == "A" else "맑은고딕")
+    if extra_box:
+        header = header.replace("</hh:refList>", extra_box + "</hh:refList>")
+    if sections > 1:
+        header = header.replace('secCnt="1"', 'secCnt="%d"' % sections)
+    body = SECTION_WITH_HEADER_FOOTER if header_footer else SECTION
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), H.MIMETYPE, zipfile.ZIP_STORED)
+        z.writestr("version.xml", '<?xml version="1.0"?><hv:HCFVersion major="5"/>')
+        z.writestr("settings.xml", '<?xml version="1.0"?><ha:HWPApplicationSetting/>')
+        z.writestr("Contents/header.xml", header)
+        for i in range(sections):
+            z.writestr("Contents/section%d.xml" % i, body.format(t="%s-%d" % (tag, i)))
+        z.writestr("Contents/content.hpf", HPF_TWO_SECTIONS if sections > 1 else HPF)
+        z.writestr("BinData/image1.png", b"\x89PNG-" + tag.encode())
+
+
+def test_multi_section_and_header_footer(tmp: Path) -> None:
+    """원래 여러 구역인 문서와 머리말·꼬리말이 있는 문서.
+
+    실제 파일로 확인하지 못한 계열이다(감사 처분요구서 3개는 모두 1구역·머리말 없음).
+    구역은 파일 경계가 아니라 **구역 수만큼** 늘어나야 하고, 머리말·꼬리말 안의 서식
+    참조도 본문과 똑같이 옮겨져야 한다 — 안 옮기면 머리말만 남의 서식으로 렌더된다.
+    """
+    a, b, out = tmp / "a.hwpx", tmp / "b.hwpx", tmp / "merged.hwpx"
+    _fixture2(a, "A", sections=2, header_footer=True)      # 2구역 + 머리말·꼬리말
+    _fixture2(b, "B", sections=1, header_footer=True)
+
+    r = H.merge([a, b], out)
+    assert r["결과"] == "성공", (r["dangling"], r["itemCnt불일치"], r["옮길수없는서식"])
+    # 구역은 파일 수(2)가 아니라 구역 수(2+1)만큼이어야 한다
+    assert r["구역"] == {"a.hwpx": 2, "b.hwpx": 1}, r["구역"]
+    z = zipfile.ZipFile(out)
+    assert "Contents/section2.xml" in z.namelist(), z.namelist()
+    assert 'secCnt="3"' in z.read("Contents/header.xml").decode()
+    hpf = z.read("Contents/content.hpf").decode()
+    assert '<opf:itemref idref="section2"' in hpf, hpf
+
+    # 머리말·꼬리말이 살아 있고, 그 안의 참조가 뒤 문서 몫으로 옮겨졌다
+    s2 = z.read("Contents/section2.xml").decode()
+    assert "B-0 머리말" in s2 and "B-0 꼬리말" in s2, s2
+    assert 'charPrIDRef="3"' in s2 and 'paraPrIDRef="3"' in s2, s2
+    s0 = z.read("Contents/section0.xml").decode()
+    assert "A-0 머리말" in s0 and 'charPrIDRef="1"' in s0, s0
+    print("  ✓ 여러 구역 문서 + 머리말·꼬리말 서식 참조 이동")
+
+    # 15개 규모 — 실제 파일로는 3개까지만 돌려봤다. id 공간과 BinData 접두사가
+    # 파일 수만큼 늘어나도 참조가 어긋나지 않아야 한다
+    many = []
+    for i in range(15):
+        p = tmp / f"m{i}.hwpx"
+        _fixture2(p, "M%d" % i)
+        many.append(p)
+    big = tmp / "big.hwpx"
+    r = H.merge(many, big)
+    assert r["결과"] == "성공", (r["dangling"][:5], r["옮길수없는서식"])
+    assert sum(r["구역"].values()) == 15, r["구역"]
+    zb = zipfile.ZipFile(big)
+    assert 'secCnt="15"' in zb.read("Contents/header.xml").decode()
+    assert r["정의수"]["charPr"] == 30, r["정의수"]          # 파일당 2개 × 15
+    assert len([n for n in zb.namelist() if n.startswith("BinData/")]) == 15, zb.namelist()
+    assert r["수량대조"]["문단"]["원본합계"] == r["수량대조"]["문단"]["병합결과"], r["수량대조"]
+    print("  ✓ 15개 규모 병합(구역 15·id 공간 30·BinData 15·참조 어긋남 0)")
+
+
+def test_unmergeable_id_space_blocks_output(tmp: Path) -> None:
+    """우리가 옮길 수 없는 id 공간이 있으면 조용히 섞지 않고 실패한다.
+
+    메모·개체가 든 문서는 header에 그 공간을 정의한다. 실측한 3개 파일에는 정의가 없어
+    참조를 그대로 뒀는데(`UNTOUCHED`), 정의가 **있는** 문서를 그대로 병합하면 2번째
+    문서의 참조가 첫 문서의 정의를 가리켜 서식이 조용히 바뀐다. 예시 파일이 없어
+    구조를 재현해 확인한다.
+    """
+    memo = ('<hh:memoProperties itemCnt="1">'
+            '<hh:memoPr id="0" width="1000" lineType="SOLID"/></hh:memoProperties>')
+    a, b, out = tmp / "a.hwpx", tmp / "b.hwpx", tmp / "merged.hwpx"
+    _fixture2(a, "A", extra_box=memo)
+    _fixture2(b, "B", extra_box=memo)
+
+    r = H.merge([a, b], out)
+    assert r["결과"] == "실패", r
+    assert any("memoProperties" in x for x in r["옮길수없는서식"]), r["옮길수없는서식"]
+    assert not out.exists(), "실패인데 결과 파일을 썼다"
+
+    # 첫 문서만 갖고 있으면 문제가 없다 — 그 정의는 그대로 남는다
+    _fixture2(b, "B")
+    r = H.merge([a, b], out)
+    assert r["결과"] == "성공", (r["옮길수없는서식"], r["dangling"])
+    assert not r["옮길수없는서식"], r["옮길수없는서식"]
+    print("  ✓ 옮길 수 없는 id 공간(메모 등) 감지 → 실패, 첫 문서만이면 통과")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="hwpx-test-"))
     try:
-        for fn in (test_merge, test_rejects, test_dangling_blocks_output):
+        for fn in (test_merge, test_rejects, test_dangling_blocks_output,
+                   test_multi_section_and_header_footer,
+                   test_unmergeable_id_space_blocks_output):
             sub = tmp / fn.__name__
             sub.mkdir()
             fn(sub)
