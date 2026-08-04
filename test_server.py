@@ -275,6 +275,30 @@ def test_optional_columns():
     print("  ✓ optional_cols 지정으로 선택 기재 칸 오탐 해소")
 
 
+def test_unreadable_stays_bad():
+    """읽지 못한 파일은 검토에서 '정상'이 될 수 없다.
+
+    재검토 초기화가 read_file이 남긴 실패 사유까지 지우고, 1단계는 읽을 수 없는 파일을
+    건너뛰기 때문에 이슈 0건 → '정상'으로 표시됐다. 브라우저에서 손상 파일을 올려보고서야
+    드러났다 — 업로드 단계는 사유를 정확히 보여주는데 검토 화면만 '정상'이었다.
+    """
+    sid = new_session()
+    broken = b"PK\x03\x04" + b"\x00" * 200          # zip 머리만 있고 내용이 깨진 파일
+    files = wait(upload(sid, [("깨진.xlsx", broken), ("기획부.xlsx", book_bytes(CLEAN))]))["files"]
+    assert files[0]["readable"] is False and files[0]["reason"], files[0]
+
+    # 첫 검토와 재검토 모두 사유를 들고 '이상'이어야 하고, 이슈가 누적되지도 않아야 한다
+    for turn in (1, 2):
+        data = wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True}))["files"]
+        bad = data[0]
+        assert bad["status"] == "이상", (turn, bad)
+        assert len(bad["issues"]) == 1, (turn, bad["issues"])
+        assert "열 수 없습니다" in bad["issues"][0]["message"], bad["issues"]
+        assert bad["selectable"] is False and bad["default_checked"] is False, bad
+        assert data[1]["status"] == "정상", (turn, data[1])
+    print("  ✓ 읽지 못한 파일은 검토에서도 '이상'(재검토에도 사유 유지)")
+
+
 def test_dept_names():
     """부서명은 파일명에서 후보를 제시하고, 사용자가 정한 값이 결과에 쓰인다 (§9)."""
     sid = new_session()
@@ -348,7 +372,8 @@ def test_job_progress():
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
     for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
-               test_optional_columns, test_dept_names, test_job_progress,
+               test_optional_columns, test_unreadable_stays_bad, test_dept_names,
+               test_job_progress,
                test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,
                test_form_requires_store):
         fn()

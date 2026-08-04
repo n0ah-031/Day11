@@ -400,6 +400,10 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
             session["preprocessed"] = False
         else:
             for uf in session["files"]:
+                # 읽지 못한 파일은 read_file이 남긴 실패 사유가 유일한 기록이다. 지우면
+                # 1단계도 건너뛰므로 이슈 0건이 되어 화면에 '정상'으로 뜬다(실제로 그랬다).
+                if not uf.readable:
+                    continue
                 uf.issues.clear()
                 uf.fixes.clear()
                 uf.ai_unverified = False

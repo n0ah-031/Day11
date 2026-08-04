@@ -254,6 +254,15 @@
 
 <!-- 키 컬럼: 작업 단위 전역 1개. 파일 업로드 전에는 숨긴다 -->
 <div id="key-col-panel" class="hidden mt-md rounded-xl glass-card shadow-soft p-6 flex flex-col gap-2">
+<!-- 생성한 양식의 작성기준 가져오기(F1-6). 양식이 없으면 이 줄을 숨긴다 -->
+<div id="template-row" class="hidden mb-4 flex flex-col gap-2">
+<label class="text-body-md font-body-md font-semibold text-on-surface" for="template-pick">생성한 양식의 작성기준</label>
+<select id="template-pick"
+        class="rounded-lg bg-surface border border-outline-variant text-body-sm font-body-sm text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</select>
+<p id="template-note" class="text-body-sm font-body-sm text-on-surface-variant">AI로 만든 양식을 고르면 그 양식의 필수·선택 구분을 아래에 채웁니다. 채운 뒤에도 직접 바꿀 수 있습니다.</p>
+</div>
+
 <label class="text-body-md font-body-md font-semibold text-on-surface" for="key-col">키 컬럼</label>
 <select id="key-col"
         class="rounded-lg bg-surface border border-outline-variant text-body-sm font-body-sm text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
@@ -608,6 +617,49 @@ AI 검증 없이 빠르게 검토
   }
 
   $('key-col').addEventListener('change', () => { state.keyCol = $('key-col').value; });
+
+  // ── 생성한 양식의 작성기준 가져오기 (F1-6) ─────────────────────────────
+  // 서버가 내려주는 형태({헤더명:{required:bool}})가 검토 요청의 optional_cols와
+  // 같은 단위라 화면의 칩에 그대로 채운다. 감춘 채로 서버에 따로 넘기지 않는 이유는
+  // 사용자가 무엇이 적용됐는지 보고 고칠 수 있어야 하기 때문이다.
+  async function loadTemplates() {
+    let list = [];
+    try {
+      const res = await fetch('/api/form/templates');
+      if (res.ok) list = (await res.json()).templates || [];
+    } catch (e) { /* 양식 생성을 안 쓰는 환경에서는 조용히 넘긴다 */ }
+    $('template-row').classList.toggle('hidden', !list.length);
+    $('template-pick').innerHTML = '<option value="">사용 안 함</option>'
+      + list.map((t) => `<option value="${esc(t.id)}">${esc(t.title)} · 항목 ${t.field_count}개</option>`).join('');
+  }
+
+  $('template-pick').addEventListener('change', async () => {
+    const id = $('template-pick').value;
+    const note = $('template-note');
+    if (!id) { note.textContent = '작성기준을 쓰지 않습니다. 아래에서 직접 고르세요.'; return; }
+    const heads = new Set(state.files.flatMap((f) => (f.sheets || []).flatMap((s) => s.headers || []))
+                                     .filter(Boolean));
+    let rules;
+    try {
+      const res = await fetch(`/api/form/templates/${id}/rules`);
+      if (!res.ok) throw new Error(await res.text());
+      rules = (await res.json()).rules || {};
+    } catch (e) {
+      note.textContent = '작성기준을 가져오지 못했습니다. 아래에서 직접 고르세요.';
+      return;
+    }
+    const missing = Object.keys(rules).filter((c) => !heads.has(c));
+    state.optionalCols = new Set(Object.entries(rules)
+      .filter(([c, r]) => r.required === false && heads.has(c)).map(([c]) => c));
+    renderKeyCol();
+    // 맞지 않은 항목을 숨기지 않는다 — 회신본이 다른 양식이면 여기서 드러난다
+    const applied = `양식 항목 ${Object.keys(rules).length}개 중 ${Object.keys(rules).length - missing.length}개가 업로드한 파일의 컬럼과 맞았고, 선택 입력 ${state.optionalCols.size}개를 채웠습니다.`;
+    note.textContent = missing.length
+      ? `${applied} 파일에 없는 항목 ${missing.length}개: ${missing.join(', ')}`
+      : applied;
+  });
+
+  loadTemplates();
 
   $('btn-review').addEventListener('click', async () => {
     clearError();
