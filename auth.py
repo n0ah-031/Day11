@@ -229,12 +229,20 @@ def _jwk_client() -> PyJWKClient:
     return _jwks
 
 
+# 토큰을 발급하는 쪽(Supabase)과 검증하는 쪽(이 서버)의 시계는 언제나 조금 어긋난다.
+# 여유가 없으면 **방금 발급된 토큰이 `iat`가 미래라는 이유로 거부된다** — 실측에서 이 머신이
+# 서버보다 3~4초 느려 로그인 직후 모든 요청이 401이 됐다(`ImmatureSignatureError`).
+# 사용자에게는 "로그인은 됐는데 아무것도 안 된다"로 보이고, 시계가 다시 맞으면 사라져
+# 원인을 찾기 어렵다. exp에도 같은 여유가 적용되지만 1분은 세션 수명(1시간)에 비해 무해하다.
+CLOCK_SKEW_SEC = 60
+
+
 def verify_token(access_token: str) -> dict:
     """JWT 서명·만료를 로컬에서 검증하고 클레임을 돌려준다."""
     try:
         key = _jwk_client().get_signing_key_from_jwt(access_token).key
         return jwt.decode(access_token, key, algorithms=["ES256", "RS256"],
-                          audience="authenticated",
+                          audience="authenticated", leeway=CLOCK_SKEW_SEC,
                           options={"require": ["exp", "sub"]})
     except jwt.ExpiredSignatureError:
         raise HTTPException(401, "세션이 만료되었습니다. 다시 로그인해주세요.")

@@ -7,6 +7,7 @@ import sys
 import time
 
 import openpyxl
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 # 취합 API 시나리오는 Supabase 없이 돌아야 하므로 인증을 명시적으로 끈다.
@@ -375,13 +376,57 @@ def test_job_progress():
     print("  ✓ 잡 진행률 폴링(단계·진행률·완료·404)")
 
 
+def test_clock_skew_tolerance():
+    """발급자와 검증자의 시계가 어긋나도 방금 발급된 토큰을 받아야 한다.
+
+    실측에서 이 머신이 Supabase보다 3~4초 느려 로그인 직후 모든 요청이 401이 됐다
+    (`iat`가 미래라 PyJWT가 `ImmatureSignatureError`). 사용자에게는 "로그인은 됐는데
+    아무것도 안 된다"로 보이고, 시계가 다시 맞으면 사라져 원인을 찾기 어렵다.
+
+    시계가 잘 맞는 머신에서는 이 결함이 드러나지 않으므로, 미래 `iat` 토큰을 직접 만들어
+    검증 경로에 태운다(네트워크 없이 돈다 — 우리 키로 서명하고 JWKS만 바꿔 끼운다).
+    """
+    import time
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    import auth
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = int(time.time())
+
+    def make(iat_offset: int) -> str:
+        return jwt.encode({"sub": "11111111-1111-1111-1111-111111111111",
+                           "aud": "authenticated", "iat": now + iat_offset,
+                           "exp": now + 3600}, key, algorithm="ES256")
+
+    real = auth._jwk_client
+    auth._jwk_client = lambda: type("K", (), {
+        "get_signing_key_from_jwt": staticmethod(
+            lambda tok: type("S", (), {"key": key.public_key()})())})()
+    try:
+        # 발급 시각이 우리 시계보다 앞서 있어도(오차 범위 안) 통과해야 한다
+        claims = auth.verify_token(make(+5))
+        assert claims["sub"].startswith("1111"), claims
+        assert auth.CLOCK_SKEW_SEC >= 30, auth.CLOCK_SKEW_SEC
+        # 오차 범위를 크게 벗어난 토큰은 여전히 거부한다(여유가 검증을 무력화하면 안 된다)
+        try:
+            auth.verify_token(make(auth.CLOCK_SKEW_SEC + 600))
+            raise AssertionError("한참 미래의 토큰이 통과했다")
+        except HTTPException as exc:
+            assert exc.status_code == 401, exc
+    finally:
+        auth._jwk_client = real
+    print("  ✓ 시계 오차 허용(방금 발급된 토큰 통과 / 한참 미래 토큰은 거부)")
+
+
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
     for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
                test_optional_columns, test_unreadable_stays_bad, test_dept_names,
                test_job_progress,
                test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,
-               test_form_requires_store):
+               test_form_requires_store, test_clock_skew_tolerance):
         fn()
     print("\n전체 통과")
     return 0

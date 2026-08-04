@@ -23,7 +23,7 @@ python3 test_aggregate.py && python3 test_server.py && python3 test_hwpx.py \
   && python3 test_formgen.py && python3 test_auth.py
 ```
 
-9개 · 12개 · 5개(확인 항목 14개가 ✓로 찍힙니다) · 9개 · 14개 시나리오가 전부
+9개 · 13개 · 5개(확인 항목 14개가 ✓로 찍힙니다) · 9개 · 14개 시나리오가 전부
 통과해야 정상입니다. 앞의 넷은 네트워크 없이 돌고, `test_auth.py`는 실제 Supabase가
 필요하며 끝나면 **DB가 계정 1건(admin01)·감사 로그 0건·버킷 양쪽 비어 있는 상태**여야
 합니다.
@@ -140,7 +140,7 @@ python3 test_formgen.py
 python3 test_auth.py
 ```
 
-앞의 네 개는 9개·12개·5개·9개 시나리오가 전부 통과해야 정상이며 **네트워크·API 키 없이** 돌아갑니다(AI 계층은 스텁, 인증은 `AUTH_DISABLED=1`로 끔).
+앞의 네 개는 9개·13개·5개·9개 시나리오가 전부 통과해야 정상이며 **네트워크·API 키 없이** 돌아갑니다(AI 계층은 스텁, 인증은 `AUTH_DISABLED=1`로 끔).
 
 `test_auth.py`는 다릅니다 — **실제 Supabase 프로젝트를 상대로** 14개 시나리오를 돌아 네트워크와 `.env`의 `SUPABASE_*`가 필요합니다. 테스트 계정은 매 실행 만들고 지웁니다(사번 접두사 `zz-test-`).
 
@@ -224,7 +224,7 @@ python3 test_auth.py
 | [ui/history.html](ui/history.html) | 작업 이력 (design.md 화면 9). 검색·유형 필터·재다운로드 |
 | [ui/admin.html](ui/admin.html) | Admin 콘솔 (design.md 화면 10). 지표·계정·정책·사용 로그 |
 | [test_auth.py](test_auth.py) | 인증·영속화·이력·Admin·F1(수정 포함)·F6 영속화 14개 시나리오. **실제 Supabase를 상대로 돌고 네트워크가 필요하다.** F1 시나리오는 LLM만 스텁으로 바꿔 store는 실제로 탄다 — 스키마 제약을 지나가야 잡히는 결함이 있다(§4) |
-| [test_server.py](test_server.py) | API 12개 시나리오(엑셀 8개 + 한글 병합 3개 + 양식 생성 사전조건 1개) |
+| [test_server.py](test_server.py) | API 13개 시나리오(엑셀 8개 + 한글 병합 3개 + 양식 생성 사전조건 1개 + 시계 오차 허용 1개) |
 | [formgen.py](formgen.py) | F1 양식 생성 + **F6 기존 양식 인지** 엔진 + CLI. 문답 턴·저작·검증 관문·xlsx 변환·작성기준 파생, 그리고 구조 추출(`read_structure`)·인지 턴(`recognize_turn`)·인지 루브릭(`recognize_gaps`). 구조 판정은 `aggregate`의 헤더·표 인식을 그대로 재사용한다 — 두 번째 판정기를 만들면 취합이 보는 헤더와 인지가 보는 헤더가 갈라진다. 마스킹은 `aggregate.mask`를 그대로 쓴다 |
 | [test_formgen.py](test_formgen.py) | 양식 생성·인지 9개 시나리오. **LLM을 스텁으로 바꿔 네트워크·비용 없이** 돈다 |
 | [ui/create.html](ui/create.html) | AI 양식 생성 + **기존 양식 등록** (design.md 화면 3 · 인지 §8). 좌측 문답(첨부·분기 버튼) / 우측 사양 카드(신뢰도 배지) / 결과 미리보기 + 동의 모달. 모드에 따라 버튼 하나가 '양식 생성'과 '이대로 등록하기'로 바뀐다 |
@@ -735,6 +735,17 @@ Storage에 양식 6개가 쌓여 있는 것을 발견했습니다(§4).
 
 **Storage는 쓰기 직후 읽기가 즉시 보장되지 않습니다.** 한글 병합 영속화 시나리오가 업로드 직후 그 객체를 읽어 한 번 간헐 실패했습니다(메시지 없는 `AssertionError`로 떠서 원인 찾기 어려웠습니다). 테스트에서 방금 올린 객체를 확인할 때는 `_object_of`처럼 잠깐 기다렸다 다시 읽으세요. 엑셀 시나리오는 업로드와 확인 사이에 검토·취합이 끼어 간격이 벌어져 안 걸렸던 것입니다. 사용자 경로는 세션의 로컬 파일을 주므로 이 지연에 걸리지 않습니다.
 
+
+### 시계 오차 (6차 회차에 걸림)
+
+**로그인은 되는데 그 뒤 모든 요청이 401이 되는 일이 있습니다.** 원인은 코드가 아니라 시계입니다 — 이
+머신이 Supabase보다 3~4초 느려서, 방금 발급된 토큰의 `iat`가 미래로 보이고 PyJWT가
+`ImmatureSignatureError`로 거부했습니다. `verify_token`에 `leeway=CLOCK_SKEW_SEC`(60초)를 뒀습니다.
+발급자와 검증자의 시계는 언제나 조금 어긋나므로 이 여유는 로컬 사정이 아니라 정상 구성입니다.
+
+**시계가 잘 맞는 머신에서는 이 결함이 드러나지 않습니다.** 그래서 `test_server.py`에 미래 `iat`
+토큰을 직접 만들어 태우는 시나리오를 뒀습니다(우리 키로 서명하고 JWKS만 바꿔 끼워 네트워크 없이
+돕니다). 여유를 크게 벗어난 토큰은 여전히 거부하는 것도 함께 지킵니다.
 
 ### 남은 경계
 
