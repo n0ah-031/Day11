@@ -484,13 +484,80 @@ def test_cli_end_to_end(tmp: Path):
     print("  ✓ CLI end-to-end(기본 제외 / 강제 포함)")
 
 
+def test_pivot_flatten(tmp: Path):
+    """총괄표류(월×지표 피벗)를 한 줄로 눕혀 지사별 1행으로 모은다.
+
+    실제 총괄표의 두 성질을 fixture에 재현한다 — ① 시트명이 파일마다 다르다,
+    ② 표가 **B열부터** 시작해 A열 헤더가 비어 있다(라벨 컬럼을 0으로 단정하면 틀린다).
+    """
+    import openpyxl
+
+    def pivot_file(path: Path, sheet_name: str, base: int) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = sheet_name
+        ws["B1"] = f"{sheet_name} 연간 집계"          # 제목 행
+        ws["B3"], ws["C3"], ws["D3"] = "구분", "신고", "조치"   # 헤더는 B열부터
+        for i, month in enumerate(("1월", "2월", "3월")):
+            r = 4 + i
+            ws[f"B{r}"], ws[f"C{r}"], ws[f"D{r}"] = month, base + i, base + i + 10
+        ws[f"B{4 + 3}"] = "합 계"                     # 합계 행은 레코드가 아니다
+        ws[f"C{4 + 3}"] = base * 3
+        wb.save(path)
+
+    a, b = tmp / "강남.xlsx", tmp / "판교.xlsx"
+    pivot_file(a, "강남지사 총괄표", 1)
+    pivot_file(b, "판교지사 총괄표", 5)
+
+    # 피벗 지정 없이 읽으면 시트명이 갈리고 월이 행으로 남는다(종전 동작)
+    plain = ag.read_file(a, include_sheets={"강남지사 총괄표"})
+    assert plain.sheets[0].name == "강남지사 총괄표", plain.sheets[0].name
+    assert len(plain.sheets[0].rows) == 3, plain.sheets[0].rows
+
+    files = []
+    for path, name, dept in ((a, "강남지사 총괄표", "강남지사"), (b, "판교지사 총괄표", "판교지사")):
+        uf = ag.read_file(path, include_sheets={name}, pivot_sheets={name})
+        uf.dept = dept
+        ag.review_stage1(uf, {})
+        files.append(uf)
+
+    flat = files[0].sheets[0]
+    assert flat.name == ag.PIVOT_SHEET_NAME, flat.name          # 한 이름으로 모인다
+    assert len(flat.rows) == 1, flat.rows                        # 파일 하나가 한 행
+    # 라벨 컬럼은 A열(빈 헤더)이 아니라 이름이 있는 첫 컬럼(`구분`)이다
+    assert flat.headers[:4] == ["1월 신고", "1월 조치", "2월 신고", "2월 조치"], flat.headers[:4]
+    assert flat.rows[0][:4] == [1, 11, 2, 12], flat.rows[0][:4]
+    assert len(flat.headers) == 6, flat.headers                  # 3개월 × 2지표, 합계 행 제외
+
+    # 시트명이 달랐던 두 파일이 모드 B에서 한 시트 2행으로 합쳐진다
+    wb, _notes = ag.synthesize(files, "B", {}, [])
+    assert wb.sheetnames == [ag.PIVOT_SHEET_NAME], wb.sheetnames
+    ws = wb[ag.PIVOT_SHEET_NAME]
+    assert ws.max_row == 3 and ws.max_column == 7, (ws.max_row, ws.max_column)
+    assert [c.value for c in ws[1]][:3] == ["부서", "1월 신고", "1월 조치"]
+    assert [ws.cell(row=r, column=1).value for r in (2, 3)] == ["강남지사", "판교지사"]
+    assert [ws.cell(row=r, column=2).value for r in (2, 3)] == [1, 5]
+
+    # 같은 라벨·컬럼이 겹치면 조용히 덮지 않고 번호를 붙인다
+    dup = ag.SheetData("x", 1, ["구분", "신고"], [["1월", 7], ["1월", 9]], [2, 3])
+    assert ag._flatten_pivot(dup).headers == ["1월 신고", "1월 신고 (2)"]
+    assert ag._flatten_pivot(dup).rows[0] == [7, 9]
+
+    # 눕히면 사진이 어느 칸에 붙어 있었는지 말할 수 없다 → 빼고 그 사실을 알린다
+    img = ag.SheetData("x", 1, ["구분", "신고"], [["1월", 7]], [2],
+                       images=[{"from": (2, 2), "to": (2, 2), "name": "p.png"}])
+    assert ag._flatten_pivot(img).images == []
+    print("  ✓ 피벗형 전개(B열 시작·시트명 통합·합계 제외·중복 번호·사진 제외)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
         for fn in (test_structure_and_stage1, test_clean_file_and_gating,
                    test_rules_and_masking, test_synthesis_modes,
                    test_image_anchor_relocation, test_real_form_structure,
-                   test_stacked_tables_and_tiered_header, test_stage2_parallel,
+                   test_stacked_tables_and_tiered_header, test_pivot_flatten,
+                   test_stage2_parallel,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()

@@ -267,6 +267,12 @@
 <div id="sheet-row" class="hidden mb-4 flex flex-col gap-2">
 <label class="text-body-md font-body-md font-semibold text-on-surface">취합할 표</label>
 <div id="sheet-pick" class="flex flex-wrap gap-2"></div>
+<p id="pivot-note" class="hidden text-body-sm font-body-sm text-on-surface-variant">
+피벗으로 지정한 표는 <strong class="text-on-surface">한 줄로 눕고</strong> 시트 이름이 `총괄표(전개)`로 통일됩니다 —
+컬럼 이름은 `1월 신고`처럼 <em>행 라벨 + 원래 컬럼명</em>이 되고, 파일 하나가 한 행이 됩니다.
+시트명이 파일마다 다른 총괄표를 <strong class="text-on-surface">모드 B·C로 한 시트에 모을 때</strong> 쓰세요
+(모드 A는 원본 보존형이라 파일별 시트로 남습니다). 표에 붙은 사진은 결과에서 빠집니다.
+</p>
 <p id="sheet-note" class="text-body-sm font-body-sm text-on-surface-variant">작성 가이드·비워 둔 대장처럼 취합 대상이 아닌 시트는 빼세요. 한 시트에 표가 여러 개면 <span class="font-semibold">(1)·(2)</span>로 나뉘어 나옵니다.</p>
 </div>
 
@@ -405,6 +411,7 @@ AI 검증 없이 빠르게 검토
     keyCol: '',         // 키 컬럼(빈 값이면 엔진 자동)
     optionalCols: new Set(),   // 비워둬도 되는 컬럼(빈 집합이면 엔진 기본값=전 컬럼 필수)
     sheets: null,       // 취합할 표 이름. null이면 아직 정하지 않음(=전체)
+    pivot: new Set(),   // 월×지표 피벗표(총괄표)로 지정한 표 — 한 줄로 눕혀 한 시트로 모은다
     deptNames: {},      // fid → 부서명. 비우면 파일명을 쓴다
     review: null,       // 2단계 응답
     included: new Set(),
@@ -622,19 +629,34 @@ AI 검증 없이 빠르게 검토
     if (state.sheets === null) state.sheets = new Set(names);        // 기본은 전체
     else state.sheets = new Set([...state.sheets].filter((n) => count.has(n)));
     $('sheet-row').classList.toggle('hidden', names.length < 2);
+    state.pivot = new Set([...state.pivot].filter((n) => count.has(n) && state.sheets.has(n)));
     $('sheet-pick').innerHTML = names.map((n) => {
       const on = state.sheets.has(n);
-      return `<button data-sheet="${esc(n)}" class="px-5 py-3 rounded-full border text-body-sm font-medium transition-all ${
+      const piv = state.pivot.has(n);
+      return `<span class="inline-flex items-center gap-1">
+        <button data-sheet="${esc(n)}" class="px-5 py-3 rounded-full border text-body-sm font-medium transition-all ${
         on ? 'bg-primary text-on-primary border-primary shadow-soft'
-           : 'bg-surface text-on-surface-variant border-outline-variant hover:border-primary/40 hover:text-primary'}">${esc(n)} <span class="opacity-70">· ${count.get(n)}개 파일</span></button>`;
+           : 'bg-surface text-on-surface-variant border-outline-variant hover:border-primary/40 hover:text-primary'}">${esc(n)} <span class="opacity-70">· ${count.get(n)}개 파일</span></button>
+        ${on ? `<button data-pivot="${esc(n)}" title="월×지표 피벗표(총괄표)로 다룹니다 — 한 줄로 눕혀 한 시트로 모읍니다"
+          class="px-3 py-2 rounded-full border text-label-sm font-label-sm transition-all ${
+          piv ? 'bg-tertiary/20 text-on-surface border-tertiary' : 'bg-surface text-on-surface-variant border-outline-variant hover:border-tertiary'}">피벗</button>` : ''}
+      </span>`;
     }).join('');
-    $('sheet-pick').querySelectorAll('button').forEach((b) => {
+    $('sheet-pick').querySelectorAll('[data-sheet]').forEach((b) => {
       b.addEventListener('click', () => {
         const n = b.dataset.sheet;
         state.sheets.has(n) ? state.sheets.delete(n) : state.sheets.add(n);
         renderKeyCol();
       });
     });
+    $('sheet-pick').querySelectorAll('[data-pivot]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const n = b.dataset.pivot;
+        state.pivot.has(n) ? state.pivot.delete(n) : state.pivot.add(n);
+        renderKeyCol();
+      });
+    });
+    $('pivot-note').classList.toggle('hidden', state.pivot.size === 0);
     return names.length;
   }
 
@@ -721,6 +743,7 @@ AI 검증 없이 빠르게 검토
         body: JSON.stringify({ no_ai: $('no-ai').checked, key_col: state.keyCol || null,
                                optional_cols: [...state.optionalCols],
                                sheets: state.sheets ? [...state.sheets] : null,
+                               pivot_sheets: [...state.pivot],
                                dept_names: state.deptNames })
       }, '파일을 검토하는 중…');
       state.included = new Set(state.review.files.filter((f) => f.default_checked).map((f) => f.fid));

@@ -463,6 +463,11 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
     if "sheets" in (body or {}):
         picked = body["sheets"]
         session["sheets"] = sorted(str(s) for s in picked) if isinstance(picked, list) else None
+    # 월×지표 피벗표(총괄표)로 지정한 표는 한 줄로 눕혀 한 시트로 모은다.
+    # 피벗인지도 이름으로 맞히지 않는다 — 담당자가 고른다
+    if "pivot_sheets" in (body or {}):
+        marked = body["pivot_sheets"]
+        session["pivot"] = sorted(str(s) for s in marked) if isinstance(marked, list) else None
 
     def work(report):
         total = len(session["files"])
@@ -472,15 +477,19 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
         # (파일당 재파싱이 검토 시간의 절반을 차지한다).
         # 표 선택이 바뀐 경우도 다시 읽어야 한다 — 뺐던 표를 되살릴 근거가 파일뿐이다.
         selected = session.get("sheets")
-        if session.get("preprocessed") or selected != session.get("loaded_sheets"):
+        pivot = session.get("pivot")
+        if (session.get("preprocessed") or selected != session.get("loaded_sheets")
+                or pivot != session.get("loaded_pivot")):
             fresh = []
             for i, uf in enumerate(session["files"]):
                 report(f"{uf.name} 원본을 다시 읽는 중", i, total)
                 fresh.append(ag.read_file(uf.path,
-                                          include_sheets=set(selected) if selected else None))
+                                          include_sheets=set(selected) if selected else None,
+                                          pivot_sheets=set(pivot) if pivot else None))
             session["files"] = fresh
             session["preprocessed"] = False
             session["loaded_sheets"] = selected
+            session["loaded_pivot"] = pivot
             _apply_dept_names(session)          # 다시 읽으면 dept가 파일명으로 돌아간다
         else:
             for uf in session["files"]:

@@ -459,13 +459,58 @@ def _read_images(ws) -> list[dict]:
     return out
 
 
+PIVOT_SHEET_NAME = "총괄표(전개)"
+
+
+def _flatten_pivot(sheet: SheetData) -> SheetData:
+    """월×지표 피벗표를 **한 줄로 눕힌다** — `{행라벨} {컬럼명}` 컬럼에 값 하나씩.
+
+    총괄표는 두 가지 이유로 종전 방식이 성립하지 않았다. ① 시트명이 파일마다 다르므로
+    (`강남지사 총괄표`) 모드 B가 파일 수만큼 시트를 갈라 놓는다. ② 안쪽이 월×지표
+    피벗이라 세로로 쌓을 축이 없다 — 같은 `1월` 행이 파일마다 있고, 쌓으면 지사 구분이
+    행 라벨에 묻힌다.
+
+    한 줄로 눕히면 지사별 1행이 되어 **기존 모드가 그대로 먹는다**(모드 B로 쌓으면
+    지사 12행, `부서` 컬럼으로 구분). 시트명을 한 이름으로 모으는 것도 그래서다.
+
+    행 라벨은 **이름이 있는 첫 컬럼**에서 읽는다(`구분` 아래 `1월`·`2월`…). 0번 컬럼으로
+    단정하면 안 된다 — 실제 총괄표는 B열부터 시작해서 A열 헤더가 비어 있다(실측에서 걸렸다.
+    `_is_summary_or_note`가 `row[0]`만 보다 합계 행을 놓쳤던 것과 같은 종류).
+    이미지는 버린다: 눕힌 뒤에는 어느 칸에 붙어 있었는지 말할 수 없다.
+    """
+    label_idx = next((i for i, h in enumerate(sheet.headers) if h), 0)
+    headers: list[str] = []
+    values: list = []
+    seen: dict[str, int] = {}
+    for row in sheet.rows:
+        cell = row[label_idx] if label_idx < len(row) else None
+        label = "" if _is_blank(cell) else str(cell).strip()
+        for idx, header in enumerate(sheet.headers):
+            if idx <= label_idx or not header:
+                continue
+            name = f"{label} {header}".strip()
+            # 라벨이 같은 행이 두 번 나오면 이름이 겹친다. 조용히 덮지 않고 번호를 붙인다
+            seen[name] = seen.get(name, 0) + 1
+            if seen[name] > 1:
+                name = f"{name} ({seen[name]})"
+            headers.append(name)
+            values.append(row[idx] if idx < len(row) else None)
+    row_number = sheet.row_numbers[0] if sheet.row_numbers else sheet.header_row + 1
+    return SheetData(PIVOT_SHEET_NAME, sheet.header_row, headers, [values] if headers else [],
+                     [row_number] if headers else [])
+
+
 def read_file(path: Path, include_hidden: bool = False,
-              include_sheets: set[str] | None = None) -> UploadedFile:
+              include_sheets: set[str] | None = None,
+              pivot_sheets: set[str] | None = None) -> UploadedFile:
     """xlsx 한 개를 읽는다.
 
     `include_sheets`를 주면 그 시트만 읽는다. 실제 양식에는 취합 대상이 아닌 시트가
     섞여 있다 — 작성 가이드, 비워 둔 대장, 지사별로 이름이 다른 총괄표. 어느 시트가
     데이터인지는 담당자가 알고 있으므로 이름 규칙으로 맞히지 않고 골라 받는다.
+
+    `pivot_sheets`에 든 표는 월×지표 피벗으로 보고 한 줄로 눕힌다(`_flatten_pivot`).
+    피벗인지도 이름으로 맞히지 않는다 — 담당자가 고른다.
     """
     uf = UploadedFile(path=path, dept=path.stem)
     if path.suffix.lower() != ".xlsx":
@@ -538,8 +583,22 @@ def read_file(path: Path, include_hidden: bool = False,
             # 전 표에 다 붙이면 남의 표 사진까지 그 표의 이슈로 잡힌다.
             lo, hla = row_numbers[0], row_numbers[-1]
             mine = [im for im in images if lo <= im["from"][0] <= hla] if len(tables) > 1 else images
-            uf.sheets.append(SheetData(name, hi + 1, headers, rows, row_numbers, mine,
-                                       merged=merged))
+            data = SheetData(name, hi + 1, headers, rows, row_numbers, mine, merged=merged)
+            if pivot_sheets and name in pivot_sheets:
+                # 피벗으로 고른 표는 한 줄로 눕히고 한 이름으로 모은다(§9 모드가 그대로 먹는다)
+                flat = _flatten_pivot(data)
+                if not flat.headers:
+                    uf.issues.append(Issue(path.name, name, "(해당없음)", "정합성", "1단계", WARN,
+                                           "피벗형으로 지정했지만 눕힐 값이 없어 건너뛰었습니다. "
+                                           "표에 데이터 행이 있는지 확인해주세요."))
+                    continue
+                if len(data.images) > 0:
+                    uf.issues.append(Issue(path.name, name, "(해당없음)", "정합성", "1단계", WARN,
+                                           f"피벗형으로 눕히면서 이 표의 사진 {len(data.images)}장을 "
+                                           "결과에서 제외했습니다(눕힌 뒤에는 붙어 있던 칸을 "
+                                           "말할 수 없습니다)."))
+                data = flat
+            uf.sheets.append(data)
             added += 1
         if added and len(tables) > 1:
             uf.issues.append(Issue(path.name, ws.title, "(해당없음)", "정합성", "1단계", WARN,
@@ -1258,6 +1317,9 @@ def main(argv=None) -> int:
     parser.add_argument("--no-ai", action="store_true", help="2단계 AI 재검증 생략")
     parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-5-mini"))
     parser.add_argument("--include-hidden", action="store_true", help="숨김 시트 포함")
+    parser.add_argument("--pivot-sheets", default="",
+                        help="월×지표 피벗표(총괄표 등) 시트명, 콤마 구분. 한 줄로 눕혀 "
+                             f"'{PIVOT_SHEET_NAME}' 한 시트로 모은다")
     args = parser.parse_args(argv)
 
     rules = json.loads(Path(args.rules).read_text(encoding="utf-8")) if args.rules else {}
@@ -1273,7 +1335,9 @@ def main(argv=None) -> int:
     files = []
     for path in paths:
         print(f"· {path.name} 검토 중")
-        uf = read_file(path, args.include_hidden)
+        uf = read_file(path, args.include_hidden,
+                       pivot_sheets={n.strip() for n in args.pivot_sheets.split(',') if n.strip()}
+                       or None)
         if uf.readable:
             review_stage1(uf, rules)
             if uf.issues:

@@ -376,6 +376,62 @@ def test_job_progress():
     print("  ✓ 잡 진행률 폴링(단계·진행률·완료·404)")
 
 
+def pivot_bytes(sheet_name: str, base: int) -> bytes:
+    """월×지표 총괄표. 실제 양식처럼 **B열부터** 시작하고 시트명이 파일마다 다르다."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws["B1"] = f"{sheet_name} 연간 집계"
+    ws["B3"], ws["C3"], ws["D3"] = "구분", "신고", "조치"
+    for i, month in enumerate(("1월", "2월")):
+        r = 4 + i
+        ws[f"B{r}"], ws[f"C{r}"], ws[f"D{r}"] = month, base + i, base + i + 10
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_pivot_sheets():
+    """총괄표류: 시트명이 파일마다 달라도 피벗으로 지정하면 한 시트 지사별 1행이 된다."""
+    sid = new_session()
+    files = wait(upload(sid, [("강남지사.xlsx", pivot_bytes("강남지사 총괄표", 1)),
+                              ("판교지사.xlsx", pivot_bytes("판교지사 총괄표", 5))]))["files"]
+    names = sorted(s["name"] for f in files for s in f["sheets"])
+    assert names == ["강남지사 총괄표", "판교지사 총괄표"], names
+
+    # 피벗 지정 없이 취합하면 시트가 파일 수만큼 갈린다(종전 동작이 그대로임을 확인)
+    wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True}))
+    plain = wait(client.post(f"/api/session/{sid}/aggregate",
+                             json={"mode": "B", "included": [0, 1]}))
+    assert len(plain["result_sheets"]) == 2, plain["result_sheets"]
+
+    # 피벗으로 지정하면 한 시트로 모인다. 표 선택이 바뀌면 원본에서 다시 읽는다
+    out = wait(client.post(f"/api/session/{sid}/review", json={
+        "no_ai": True, "sheets": ["강남지사 총괄표", "판교지사 총괄표"],
+        "pivot_sheets": ["강남지사 총괄표", "판교지사 총괄표"]}))
+    # 컬럼 이름이 `행 라벨 + 원래 컬럼명`으로 바뀐다(원래 컬럼명만으로는 남지 않는다)
+    assert "1월 신고" in out["columns"] and "2월 조치" in out["columns"], out["columns"]
+    assert "신고" not in out["columns"] and "구분" not in out["columns"], out["columns"]
+    assert all(f["status"] == "정상" for f in out["files"]), out["files"]
+
+    merged = wait(client.post(f"/api/session/{sid}/aggregate",
+                              json={"mode": "B", "included": [0, 1]}))
+    assert merged["result_sheets"] == ["총괄표(전개)"], merged["result_sheets"]
+
+    dl = client.get(f"/api/session/{sid}/download/result")
+    assert dl.status_code == 200, dl.status_code
+    ws = openpyxl.load_workbook(io.BytesIO(dl.content))["총괄표(전개)"]
+    assert ws.max_row == 3 and ws.max_column == 5, (ws.max_row, ws.max_column)
+    assert [c.value for c in ws[1]][:2] == ["부서", "1월 신고"], [c.value for c in ws[1]]
+    assert [ws.cell(row=r, column=2).value for r in (2, 3)] == [1, 5]
+
+    # 되돌릴 수 있어야 한다 — 지정을 비우면 다시 시트가 갈린다
+    back = wait(client.post(f"/api/session/{sid}/review",
+                            json={"no_ai": True, "pivot_sheets": []}))
+    assert "신고" in back["columns"] and "1월 신고" not in back["columns"], back["columns"]
+    print("  ✓ 총괄표류 피벗 전개(시트명 통합·1행·되돌리기)")
+
+
 def test_clock_skew_tolerance():
     """발급자와 검증자의 시계가 어긋나도 방금 발급된 토큰을 받아야 한다.
 
@@ -426,7 +482,8 @@ def main() -> int:
                test_optional_columns, test_unreadable_stays_bad, test_dept_names,
                test_job_progress,
                test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,
-               test_form_requires_store, test_clock_skew_tolerance):
+               test_form_requires_store, test_pivot_sheets,
+               test_clock_skew_tolerance):
         fn()
     print("\n전체 통과")
     return 0
