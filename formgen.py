@@ -27,10 +27,12 @@ from pathlib import Path
 import aggregate as ag
 
 TURN_LIMIT = 30           # §4.3 최대 턴 가드
+RECOGNIZE_TURN_LIMIT = 10  # 인지 §4.3 — 구조가 이미 주어져 확인 질문이 적은 것이 정상
 AUTHOR_RETRY = 2          # §6.3 검증 실패 시 재저작 횟수
 MAX_SHEETS = 10
 MAX_CELLS = 10_000
 ATTACH_CHARS = 8_000      # §6.5 첨부 추출 텍스트 절단
+SAMPLE_ROWS = 3           # 인지 §6.2 sample_rows — 형식 추론에 필요한 만큼만
 
 FIELD_TYPES = ("text", "number", "amount", "date", "name", "dept_code")
 STYLE_KEYS = ("bold", "italic", "size", "bg", "color", "border", "align", "number_format")
@@ -117,6 +119,65 @@ AUTHOR_SYSTEM = f"""당신은 확정된 사양(spec_json)을 받아 배포용 �
                         "prompt": "YYYY-MM-DD 형식으로 입력", "error": "날짜 형식이 올바르지 않습니다"}}]
     }}
   ]
+}}"""
+
+
+RECOGNIZE_SYSTEM = f"""당신은 이미 쓰이고 있는 엑셀 양식을 읽고 그 양식의 작성기준을
+알아내는 분석가입니다. 사용자는 이 양식을 **새로 만들 생각이 없고 그대로 쓰려고** 합니다.
+당신이 하는 일은 양식을 고치는 것이 아니라, 회신본을 검토할 때 쓸 항목 정보를 확정하는
+것입니다.
+
+먼저 사용자의 의도를 판정합니다(intent).
+- recognize: 첨부한 양식을 그대로 쓰겠다는 뜻(예: "이 양식으로 받을 거야", "기존 양식이야")
+- generate: 첨부는 참고일 뿐 새 양식을 만들어 달라는 뜻(예: "이거 비슷하게 새로 만들어줘")
+- ambiguous: 둘 중 어느 쪽인지 판단할 수 없음. reply에 어느 쪽인지 묻는 질문을 담습니다
+
+structure에는 파일에서 찾은 **표 목록**이 들어 있습니다(표마다 헤더·기존 표시형식·기존
+유효성검사·샘플 행). 이것을 근거로 항목별 자료 유형·입력 형식·필수 여부를 추론합니다.
+
+**표가 둘 이상이면 어느 표로 회신을 받을지 먼저 정해야 합니다.** 실제 양식에는 작성 가이드,
+비워 둔 대장, 월×지표 총괄표처럼 회신 대상이 아닌 표가 섞여 있습니다. 이름과 헤더만으로
+확실하지 않으면 **추측하지 말고 사용자에게 물어보세요.** 정한 표 이름을 selected_sheets에
+그대로(structure의 name과 글자 단위로 같게) 담고, fields는 **고른 표의 헤더만** 다룹니다.
+표가 하나면 selected_sheets에 그 하나를 담습니다.
+
+지켜야 할 것:
+- **항목 이름(name)은 헤더 문자열을 글자 그대로 옮깁니다.** 다듬거나 번역하거나 * 표시를
+  떼지 마세요. 이 이름으로 회신본의 열을 찾기 때문에, 한 글자만 달라도 그 항목의 검토가
+  통째로 빗나갑니다.
+- 헤더를 빠뜨리거나 없는 항목을 더하지 마세요. structure의 헤더와 fields는 1:1입니다.
+- **필수/선택은 근거가 있을 때만 confidence를 high로 둡니다.** 근거가 되는 것은 헤더 끝의
+  `*` 표시, 양식의 작성 안내 문구, 사용자가 말해준 것입니다. 표시가 없다는 것만으로 선택이라고
+  단정하지 마세요. 샘플 행이 다 채워져 있다는 것도 근거가 아닙니다(회신자가 성실했을 뿐입니다).
+  근거가 없으면 **low로 두고 어느 항목이 필수인지 물어보세요** — 여기가 틀리면 회신본 검토에서
+  누락을 못 잡거나 없는 누락을 잡습니다.
+- existing_number_format이 `yyyy-mm-dd`·`#,##0` 처럼 형식을 알려주면 그대로 format에
+  옮깁니다(추측이 아니라 파일에 적힌 값입니다). 값이 null이면 형식을 지정하지 않은 열이라
+  근거가 없다는 뜻입니다 — 지어내지 마세요.
+- existing_validation의 list source는 그 항목의 코드표입니다. notes에 남기세요.
+- 근거가 있는 항목은 confidence를 "high", 파일만 봐서는 알 수 없어 사용자에게 물어야 하는
+  항목은 "low"로 둡니다. **모르는 것을 그럴듯하게 채우지 말고 low로 두고 물어보세요.**
+- 질문은 한 번에 한 주제만, low인 항목에 대해서만 합니다. 다 확인됐으면 그때
+  recognize_complete를 true로 둡니다.
+- type은 {", ".join(FIELD_TYPES)} 중 하나입니다. date·amount는 format을 반드시 채웁니다.
+
+반드시 아래 JSON만 출력합니다.
+{{
+  "intent": "recognize|generate|ambiguous",
+  "reply": "사용자에게 보여줄 한국어 메시지",
+  "spec_json": {{
+    "form_title": "양식 이름(파일명·제목 행에서)",
+    "target_depts": ["전체 부서"],
+    "selected_sheets": ["회신받을 표 이름(structure의 name 그대로)"],
+    "fields": [
+      {{"name": "헤더 그대로", "type": "text|number|amount|date|name|dept_code",
+       "required": true, "format": "형식 또는 null", "notes": "비고 또는 null",
+       "confidence": "high|low"}}
+    ],
+    "layout_hints": null,
+    "locale": "ko"
+  }},
+  "recognize_complete": false
 }}"""
 
 
@@ -235,6 +296,260 @@ def intake_turn(messages: list[dict], spec: dict, model: str,
         "gaps": gaps,
         # 지금 처리한 턴까지의 개수. `turn+1`은 아직 오지 않은 턴을 세는 셈이라
         # intake_sessions.turn_count가 실제보다 1 많게 남았다(6턴 문답이 7로 기록).
+        "turn": turn,
+    }
+
+
+# ── F6 기존 양식 인지 ─────────────────────────────────────────────────────────
+# 구조 판정을 새로 쓰지 않는다. 실제 업무 양식 두 계열로 검증된 헤더·표 인식이
+# aggregate에 이미 있고(계층 헤더 합성, 한 시트 여러 표, 합계·서식 행 제외), 두 번째
+# 판정기를 만들면 **취합이 보는 헤더와 인지가 보는 헤더가 갈라진다.** 그러면 인지로 만든
+# 작성기준의 항목명이 취합 때 열을 못 찾는다.
+
+# 성명으로 보이는 열 판정. `서명`을 넣으면 **부서명**이 걸려 부서 값이 통째로 가려진다
+# (실제로 걸렸다). 서명 열은 대개 `담당자 서명`이라 담당자로 잡힌다.
+NAME_HEADERS = ("성명", "이름", "담당자", "작성자")
+
+
+def _blank_form_headers(grid: list[list], merged: list) -> tuple | None:
+    """값이 하나도 없는 빈 양식의 헤더를 찾는다 (인지 E5 — 빈 양식도 등록 대상).
+
+    `aggregate._find_header`는 헤더 **다음 행에 값이 있을 때만** 헤더로 확정한다. 취합에서는
+    맞다 — 데이터가 없으면 취합할 것이 없다. 하지만 배포 전 빈 양식은 헤더 아래가 전부
+    비어 있는 것이 정상이라 그 규칙으로는 하나도 못 찾는다. 그래서 이 경로만 따로 둔다.
+    """
+    best, count = -1, 0
+    for i, row in enumerate(grid):
+        filled = [v for v in row if not ag._is_blank(v)]
+        if len(filled) >= 2 and all(isinstance(v, str) for v in filled) and len(filled) > count:
+            best, count = i, len(filled)
+    if best < 0:
+        return None
+    top, bottom = ag._header_block(grid, best, merged)
+    return (top, ag._compose_headers(grid, top, bottom, merged), [], [], [], [])
+
+
+def _validation_map(ws) -> dict:
+    """열 문자 → 그 열에 걸린 기존 유효성 검사 (인지 §6.2 existing_validation).
+
+    드롭다운 목록은 그 항목의 코드표라는 근거다 — 추론이 아니라 파일에 적혀 있는 값이다.
+    """
+    out: dict[str, dict] = {}
+    for dv in getattr(ws.data_validations, "dataValidation", []) or []:
+        source = None
+        formula = str(dv.formula1 or "")
+        if dv.type == "list" and formula.startswith('"') and formula.endswith('"'):
+            source = [s.strip() for s in formula[1:-1].split(",") if s.strip()]
+        info = {"type": dv.type, "source": source}
+        for rng in str(dv.sqref or "").split():
+            letters = re.findall(r"([A-Z]{1,3})", rng.replace("$", ""))
+            for letter in letters[:1] or []:
+                out.setdefault(letter, info)
+    return out
+
+
+def read_structure(path: Path) -> dict:
+    """xlsx 양식의 구조를 뽑는다 (인지 §6.2). 파일은 열어서 읽기만 한다(E1 무변경).
+
+    `sample_rows`는 예시 데이터가 든 파일에서만 채워지고 빈 양식이면 빈 배열이다(E5).
+    성명으로 보이는 열의 값은 아예 담지 않는다(§9.2 J4) — 예시 데이터는 실제 회신본일
+    가능성이 높고, 유형 판정에는 헤더만으로 충분해서 값을 들고 있을 이득이 없다.
+    """
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+
+    if path.suffix.lower() != ".xlsx":
+        raise FormGenError(f"등록할 수 있는 양식은 xlsx뿐입니다({path.suffix}는 등록 대상이 "
+                           "아닙니다).")
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception as exc:
+        raise FormGenError(f"양식 파일을 열 수 없습니다(손상 또는 암호 보호 가능): {exc}")
+
+    sheets, omitted = [], []
+    for ws in wb.worksheets:
+        if ws.sheet_state != "visible":
+            continue
+        grid = [list(r) for r in ws.iter_rows(values_only=True)]
+        merged = [(r.min_row, r.min_col, r.max_row, r.max_col) for r in ws.merged_cells.ranges]
+        tables = ag._split_tables(grid, merged) or []
+        if not tables:
+            blank = _blank_form_headers(grid, merged)
+            if blank is None:
+                continue                     # 표가 아닌 시트(작성 안내 등) — 등록 대상 아님
+            tables = [blank]
+        dvs = _validation_map(ws)
+        for part, (hi, headers, rows, row_numbers, *_rest) in enumerate(tables, 1):
+            # 세로 병합 값 채우기는 `read_file`이 `_split_tables` 뒤에 따로 한다. 여기서도
+            # 통과시키지 않으면 병합된 `지사`·`개소`가 샘플에서 빈 칸으로 보여 모델이
+            # '선택 항목'으로 오추론한다(실측 양식이 A5:A17처럼 병합돼 있다).
+            ag._fill_merged(rows, row_numbers, merged)
+            if not any(h for h in headers):
+                continue
+            if len(sheets) >= MAX_SHEETS:
+                omitted.append(ws.title if len(tables) == 1 else f"{ws.title} ({part})")
+                continue
+            cols, samples = [], []
+            for idx, header in enumerate(headers):
+                if not header:
+                    continue
+                letter = get_column_letter(idx + 1)
+                cell = ws.cell(row=hi + 2, column=idx + 1)
+                # `General`은 표시형식을 지정하지 않았다는 뜻이다. 그대로 올려보내면
+                # 모델이 그걸 입력 형식으로 옮겨 적어 'General'이 화면에 뜬다(실측).
+                fmt = cell.number_format
+                cols.append({"letter": letter, "header": header,
+                             "existing_number_format": None if fmt == "General" else fmt,
+                             "existing_validation": dvs.get(letter)})
+            for row in rows[:SAMPLE_ROWS]:
+                sample = {}
+                for idx, header in enumerate(headers):
+                    if not header or idx >= len(row):
+                        continue
+                    value = row[idx]
+                    if any(k in header for k in NAME_HEADERS) and not ag._is_blank(value):
+                        value = "(성명 마스킹)"
+                    sample[header] = value if value is None or isinstance(
+                        value, (str, int, float)) else str(value)
+                samples.append(sample)
+            sheets.append({
+                "name": ws.title if len(tables) == 1 else f"{ws.title} ({part})",
+                "header_row": hi + 1,
+                "headers": [h for h in headers if h],
+                "columns": cols,
+                "sample_rows": samples,
+            })
+
+    if not sheets:
+        raise FormGenError("이 파일에서 표(열 제목 행)를 찾지 못해 양식으로 등록할 수 "
+                           "없습니다. 제목 행과 입력 칸 사이에 열 제목 행이 있는지 "
+                           "확인해주세요.")
+    out = {"sheets": sheets}
+    if omitted:
+        # 조용히 자르지 않는다 — 무엇이 빠졌는지 화면에서 밝힌다
+        out["omitted_sheets"] = omitted
+    return out
+
+
+def selected_tables(spec: dict, structural: dict) -> list[dict]:
+    """회신받을 표. 파일에 표가 하나면 고를 것이 없어 그것으로 본다.
+
+    둘 이상이면 사용자가 대화에서 정한 것만 쓴다 — 실제 양식은 한 파일에 작성 가이드·
+    비워 둔 대장·총괄표가 섞여 있어(실측: 한 파일에 표 6개·헤더 142개) 전 표를 항목으로
+    다루면 인지 자체가 성립하지 않는다. 이름 규칙으로 맞히지 않는 것은 F2의 '취합할 표
+    고르기'와 같은 이유다.
+    """
+    sheets = (structural or {}).get("sheets") or []
+    if len(sheets) == 1:
+        return list(sheets)
+    picked = [str(n) for n in (spec.get("selected_sheets") or [])]
+    return [s for s in sheets if s.get("name") in picked]
+
+
+def structure_headers(structural: dict, spec: dict | None = None) -> list[str]:
+    """회신받을 표의 헤더 전체(중복 제거, 순서 유지)."""
+    seen: dict[str, None] = {}
+    for sheet in selected_tables(spec or {}, structural):
+        for header in sheet.get("headers") or []:
+            name = str(header).strip()
+            if name:
+                seen.setdefault(name, None)
+    return list(seen)
+
+
+REQUIRED_MARKS = ("*", "필수")
+
+
+def _required_evidence(spec: dict, structural: dict, messages: list[dict] | None) -> bool:
+    """필수/선택을 판단할 근거가 있는가 — 양식의 표시이거나 사용자가 말해준 것.
+
+    빈 양식·회신본 어느 쪽도 '이 칸을 꼭 채워야 하는지'를 파일에 담고 있지 않다. 값이 다
+    채워져 있다는 것도 근거가 아니다(회신자가 성실했을 뿐이다).
+    """
+    for sheet in selected_tables(spec, structural):
+        for header in sheet.get("headers") or []:
+            if any(mark in str(header) for mark in REQUIRED_MARKS):
+                return True
+    return any(("필수" in (m.get("content") or "") or "선택" in (m.get("content") or ""))
+               for m in messages or [] if m.get("role") == "user")
+
+
+def recognize_gaps(spec: dict, structural: dict, messages: list[dict] | None = None) -> list[str]:
+    """인지 §4.3 완결성 루브릭. `rubric_gaps`에 **헤더 1:1 대응**을 더한 것이다.
+
+    1:1을 강하게 보는 이유는 취합이 항목명으로 열을 찾기 때문이다. 항목이 하나 빠지면
+    그 열은 작성기준 없이 검토되고, 이름이 다듬어지면 그 항목의 검토가 통째로 빗나간다.
+    """
+    gaps = rubric_gaps(spec)
+    sheets = (structural or {}).get("sheets") or []
+    if len(sheets) > 1 and not selected_tables(spec, structural):
+        names = ", ".join(str(s.get("name")) for s in sheets)
+        return [f"회신받을 표 (이 파일에서 찾은 표: {names})"] + gaps
+    headers = structure_headers(structural, spec)
+    names = [(f.get("name") or "").strip() for f in spec.get("fields") or []]
+    for header in headers:
+        if header not in names:
+            gaps.append(f"양식의 '{header}' 항목 정보")
+    for name in names:
+        if name and name not in headers:
+            gaps.append(f"'{name}'은 양식에 없는 항목입니다")
+    # 확신도가 낮은 항목은 확정으로 보지 않는다 (인지 §6.3·E7).
+    fields = spec.get("fields") or []
+    for f in fields:
+        if str(f.get("confidence") or "").lower() == "low":
+            gaps.append(f"'{(f.get('name') or '').strip()}' 확인 필요")
+
+    # 근거가 없는데 전 항목의 필수/선택이 똑같이 나오면 그것은 판정이 아니라 기본값이다.
+    # 실측에서 모델이 8개 항목을 전부 '선택 · 확인됨'으로 내려보냈다 — 프롬프트로
+    # "근거 없으면 물어봐"라고 못 박아도 회차마다 흔들려서 여기서 막는다. 그대로 등록하면
+    # 작성기준이 아무 누락도 잡지 못하는데 화면에는 '확인됨'으로 뜬다.
+    if fields and len({bool(f.get("required")) for f in fields}) == 1 \
+            and not _required_evidence(spec, structural, messages):
+        gaps.append("필수 입력 항목 지정(양식에 * 표시가 없어 파일만으로는 알 수 없습니다)")
+    return list(dict.fromkeys(gaps))
+
+
+def recognize_turn(messages: list[dict], spec: dict, structural: dict, model: str,
+                   attachments: list[dict] | None = None, client=None) -> dict:
+    """인지 모드 한 턴. 의도 판정(F6-1)과 구조 인지(F6-3)를 한 호출로 한다.
+
+    명세 §6.1은 `classify_intent`와 `recognize_turn`을 따로 두되 한 호출로 합쳐도 된다고
+    했다. 합친다 — 첨부한 양식이 있을 때만 이 경로를 타므로, 의도를 물을 상황과 구조를
+    읽을 상황이 언제나 같이 온다. 호출을 나누면 매 턴 값을 두 번 내는 셈이다.
+    """
+    turn = len([m for m in messages if m.get("role") == "user"])
+    payload = {
+        "conversation": [{"role": m.get("role"), "content": m.get("content")} for m in messages],
+        "current_spec": spec or {},
+        "structure": structural,
+        "attachments": [{"name": a.get("original_name"), "kind": a.get("kind"),
+                         "content": (a.get("extracted") or "")[:ATTACH_CHARS]}
+                        for a in (attachments or [])],
+    }
+    # 백엔드가 아직 요구하는 것을 알려준다. 이것 없이는 모델이 "확인할 질문 없습니다"라고
+    # 하고 사용자만 gaps 패널을 보게 되어 대화가 수렴하지 않는다.
+    still = recognize_gaps(spec or {}, structural, messages) if spec else []
+    if still:
+        payload["still_missing"] = still
+    if turn >= RECOGNIZE_TURN_LIMIT:
+        payload["instruction"] = ("턴 수 상한에 도달했습니다. 더 묻지 말고 파일에서 확인된 "
+                                 "내용으로 항목 정보를 마감하세요.")
+
+    out = _ask(RECOGNIZE_SYSTEM, _masked(payload), model, client)
+    intent = out.get("intent")
+    if intent not in ("recognize", "generate", "ambiguous"):
+        intent = "ambiguous"                 # 판정을 못 받으면 사용자에게 되묻는다(R6)
+    new_spec = out.get("spec_json") if isinstance(out.get("spec_json"), dict) else (spec or {})
+
+    gaps = recognize_gaps(new_spec, structural, messages)
+    complete = intent == "recognize" and bool(out.get("recognize_complete")) and not gaps
+    return {
+        "intent": intent,
+        "reply": str(out.get("reply") or "").strip() or "조금 더 알려주세요.",
+        "spec_json": new_spec,
+        "spec_complete": complete,
+        "coverage": {"confirmed_topics": [], "remaining_topics": gaps},
+        "gaps": gaps,
         "turn": turn,
     }
 

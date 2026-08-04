@@ -254,13 +254,13 @@
 
 <!-- 키 컬럼: 작업 단위 전역 1개. 파일 업로드 전에는 숨긴다 -->
 <div id="key-col-panel" class="hidden mt-md rounded-xl glass-card shadow-soft p-6 flex flex-col gap-2">
-<!-- 생성한 양식의 작성기준 가져오기(F1-6). 양식이 없으면 이 줄을 숨긴다 -->
+<!-- 생성·등록한 양식의 작성기준 가져오기(F1-6·F6-6). 양식이 없으면 이 줄을 숨긴다 -->
 <div id="template-row" class="hidden mb-4 flex flex-col gap-2">
-<label class="text-body-md font-body-md font-semibold text-on-surface" for="template-pick">생성한 양식의 작성기준</label>
+<label class="text-body-md font-body-md font-semibold text-on-surface" for="template-pick">생성·등록한 양식의 작성기준</label>
 <select id="template-pick"
         class="rounded-lg bg-surface border border-outline-variant text-body-sm font-body-sm text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
 </select>
-<p id="template-note" class="text-body-sm font-body-sm text-on-surface-variant">AI로 만든 양식을 고르면 그 양식의 필수·선택 구분을 아래에 채웁니다. 채운 뒤에도 직접 바꿀 수 있습니다.</p>
+<p id="template-note" class="text-body-sm font-body-sm text-on-surface-variant">AI로 만든 양식이나 그대로 등록한 기존 양식을 고르면 그 양식의 필수·선택 구분을 아래에 채웁니다. 채운 뒤에도 직접 바꿀 수 있습니다.</p>
 </div>
 
 <!-- 취합할 표 고르기. 표가 하나뿐이면 고를 것이 없으니 숨긴다 -->
@@ -656,7 +656,7 @@ AI 검증 없이 빠르게 검토
 
   $('key-col').addEventListener('change', () => { state.keyCol = $('key-col').value; });
 
-  // ── 생성한 양식의 작성기준 가져오기 (F1-6) ─────────────────────────────
+  // ── 생성·등록한 양식의 작성기준 가져오기 (F1-6·F6-6) ──────────────────
   // 서버가 내려주는 형태({헤더명:{required:bool}})가 검토 요청의 optional_cols와
   // 같은 단위라 화면의 칩에 그대로 채운다. 감춘 채로 서버에 따로 넘기지 않는 이유는
   // 사용자가 무엇이 적용됐는지 보고 고칠 수 있어야 하기 때문이다.

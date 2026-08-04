@@ -11,6 +11,7 @@ aggregate.py(CLI 엔진)를 수정 없이 import해 브라우저 흐름에 얹�
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -19,7 +20,8 @@ import uuid
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import Body, Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import (Body, Cookie, Depends, FastAPI, File, Form, HTTPException, Response,
+                     UploadFile)
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +36,7 @@ MAX_FILE_MB = 50            # 파일 1개 상한
 MAX_SESSION_FILES = 30      # 세션 누적 파일 수 상한
 MAX_SESSION_MB = 500        # 세션 누적 용량 상한
 SESSION_TTL_H = 6           # 이 시간이 지난 세션의 임시 폴더는 지운다 (F3-5)
+MAX_ATTACHMENTS = 5         # 문답 세션당 첨부 상한 (인지 J6)
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 HWPX_MIME = "application/hwp+zip"
 
@@ -590,6 +593,123 @@ def _my_session(sid: str, user: dict) -> dict:
     return session
 
 
+def _primary_attachment(session: dict) -> dict | None:
+    """등록 대상으로 표시된 xlsx 첨부. 이 값이 있으면 세션은 인지 모드다 (F6-1)."""
+    for a in session.get("attachments_json") or []:
+        if a.get("primary") and a.get("structural"):
+            return a
+    return None
+
+
+def _attachment_view(session: dict) -> list[dict]:
+    """화면에 내려줄 첨부 목록. 구조 전체는 무거워서 표 이름·헤더 수만 보낸다."""
+    out = []
+    for a in session.get("attachments_json") or []:
+        tables = [{"name": s.get("name"), "headers": s.get("headers") or []}
+                  for s in (a.get("structural") or {}).get("sheets") or []]
+        out.append({"id": a.get("id"), "name": a.get("original_name"), "kind": a.get("kind"),
+                    "primary": bool(a.get("primary")), "note": a.get("note"), "tables": tables})
+    return out
+
+
+def _hwpx_reference(path: Path) -> str:
+    """hwpx 첨부는 **참고 자료로만** 쓴다(인지 §6.4 — 등록 대상이 될 수 없다).
+
+    본문 텍스트만 뽑는다. 병합 엔진의 읽기를 그대로 쓰므로 hwpx 판정 규칙이 갈라지지 않는다.
+    """
+    doc = hm._read(path)
+    text = re.sub(r"<[^>]+>", " ", " ".join(doc["sections"]))
+    return re.sub(r"\s+", " ", text).strip()[:fg.ATTACH_CHARS]
+
+
+def _structure_preview(spec: dict, structural: dict) -> list[dict]:
+    """구조 추출을 F1 생성 결과와 같은 모양(`sheets[].cells[]`)으로 바꾼다.
+
+    화면의 미리보기 표를 두 벌 만들지 않기 위해서다 — 등록 양식은 셀 단위 저작물이 없으니
+    헤더와 샘플 행을 그 자리에 놓는다. 파일을 고치는 것이 아니라 보여주기만 한다.
+    """
+    from openpyxl.utils import get_column_letter
+    sheets = []
+    for table in fg.selected_tables(spec, structural):
+        headers = table.get("headers") or []
+        cells = [{"ref": f"{get_column_letter(i + 1)}1", "value": h}
+                 for i, h in enumerate(headers)]
+        for r, row in enumerate(table.get("sample_rows") or [], start=2):
+            for i, h in enumerate(headers):
+                value = row.get(h)
+                if value is not None:
+                    cells.append({"ref": f"{get_column_letter(i + 1)}{r}", "value": value})
+        sheets.append({"name": table.get("name"), "cells": cells})
+    return sheets
+
+
+@app.post("/api/form/attachments")
+async def form_attachments(session_id: str = Form(""), files: list[UploadFile] = File(...),
+                           user: dict = User) -> dict:
+    """F1-3 참고 첨부 · F6-2 등록 대상 양식 업로드.
+
+    xlsx는 구조를 읽어 등록 후보로 삼고(F6), hwpx는 참고 자료로만 쓴다. png는 받지 않는다.
+    세션이 없으면 여기서 만든다 — 첨부가 첫 턴의 의도 판정 재료라 문답보다 먼저 온다.
+    """
+    _require_consent(user)
+    if not store.enabled() or not user.get("id"):
+        raise HTTPException(503, "양식 첨부는 Supabase 설정이 필요합니다.")
+    if session_id:
+        session = _my_session(session_id, user)
+        if session["status"] == "closed":
+            raise HTTPException(400, "이미 끝난 문답입니다. 새로 시작해주세요.")
+    else:
+        project_id = store.create_project(user["id"], "AI 양식 생성")
+        session = store.create_intake_session(project_id, None)
+
+    attachments = list(session.get("attachments_json") or [])
+    has_primary = _primary_attachment(session) is not None
+    tmp = Path(tempfile.mkdtemp(prefix="attach-"))
+    try:
+        for up in files:
+            name = Path(up.filename or "").name
+            ext = Path(name).suffix.lower()
+            if ext not in (".xlsx", ".hwpx"):
+                raise HTTPException(400, f"'{name}'은(는) 첨부할 수 없습니다. 등록할 양식은 "
+                                         "xlsx, 참고 자료는 hwpx만 붙일 수 있습니다.")
+            if len(attachments) + 1 > MAX_ATTACHMENTS:
+                raise HTTPException(400, f"첨부는 최대 {MAX_ATTACHMENTS}개입니다.")
+            data = await up.read()
+            if len(data) > MAX_FILE_MB * 1024 * 1024:
+                raise HTTPException(400, f"'{name}'의 용량이 {MAX_FILE_MB}MB를 초과합니다.")
+            path = tmp / f"{uuid.uuid4().hex}{ext}"
+            path.write_bytes(data)
+
+            entry = {"id": uuid.uuid4().hex, "original_name": name,
+                     "kind": "xlsx" if ext == ".xlsx" else "hwpx"}
+            if ext == ".xlsx":
+                try:
+                    entry["structural"] = fg.read_structure(path)
+                    if has_primary:
+                        # 등록 대상은 하나뿐이다(인지 J6). 나머지는 참고로만 쓴다고 밝힌다
+                        entry["note"] = "등록 대상 양식이 이미 있어 참고 자료로만 씁니다."
+                    else:
+                        entry["primary"], has_primary = True, True
+                except fg.FormGenError as exc:
+                    entry["note"] = f"양식으로 등록할 수 없어 참고 자료로만 씁니다: {exc}"
+            else:
+                try:
+                    entry["extracted"] = _hwpx_reference(path)
+                except hm.MergeError as exc:
+                    raise HTTPException(400, str(exc))
+                entry["note"] = "hwpx는 참고 자료로만 쓰이며 등록 대상이 될 수 없습니다."
+            entry["storage_path"] = store.put_attachment(session["project_id"], path, name)
+            attachments.append(entry)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    store.update_intake_session(session["id"], attachments_json=attachments)
+    session["attachments_json"] = attachments
+    return {"session_id": session["id"], "project_id": session["project_id"],
+            "mode": "recognize" if has_primary else "generate",
+            "attachments": _attachment_view(session)}
+
+
 @app.post("/api/form/consent")
 def form_consent(user: dict = User) -> dict:
     if not _auth_disabled() and user.get("id"):
@@ -657,10 +777,32 @@ def form_message(sid: str, body: dict = Body(...), user: dict = User) -> dict:
 
 
 def _turn(session: dict, user: dict) -> dict:
-    """LLM 한 턴을 돌리고 세션에 반영한다. 저장은 원문, 마스킹은 전송 때만(§9.2)."""
+    """LLM 한 턴을 돌리고 세션에 반영한다. 저장은 원문, 마스킹은 전송 때만(§9.2).
+
+    등록 대상 xlsx가 붙어 있으면 인지 모드로 돈다(F6-1). 모드를 따로 저장하지 않는 이유는
+    첨부의 `primary` 표시가 곧 그 상태라서다 — 별도 컬럼을 두면 둘이 어긋날 수 있다.
+    """
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+    attachments = list(session.get("attachments_json") or [])
+    primary = _primary_attachment(session)
+    others = [a for a in attachments if a is not primary]
     try:
-        out = fg.intake_turn(session["messages_json"], session.get("spec_json") or {}, model)
+        if primary is not None:
+            out = fg.recognize_turn(session["messages_json"], session.get("spec_json") or {},
+                                    primary["structural"], model, attachments=others)
+            if out["intent"] == "generate":
+                # 첨부를 참고로만 쓰겠다는 뜻이다(F1-3). 등록 대상 표시를 내리면 다음 턴부터
+                # 생성 모드로 돈다. 이번 턴 사양은 그대로 두되 완료로는 보지 않는다 —
+                # 생성 완결성은 생성 루브릭으로 다시 판정해야 한다.
+                for a in attachments:
+                    a.pop("primary", None)
+                store.update_intake_session(session["id"], attachments_json=attachments)
+                out["spec_complete"] = False
+                out["gaps"] = fg.rubric_gaps(out["spec_json"])
+                primary = None
+        else:
+            out = fg.intake_turn(session["messages_json"], session.get("spec_json") or {},
+                                 model, attachments=attachments)
     except fg.FormGenError as exc:
         # AI가 기능 자체라 건너뛸 수 없다. 사유를 그대로 전달한다(§9.4)
         raise HTTPException(503, str(exc))
@@ -671,17 +813,74 @@ def _turn(session: dict, user: dict) -> dict:
         turn_count=out["turn"], status="spec_complete" if out["spec_complete"] else "active")
     return {"reply": out["reply"], "spec_json": out["spec_json"],
             "spec_complete": out["spec_complete"], "coverage": out["coverage"],
-            "gaps": out["gaps"], "messages": messages}
+            "gaps": out["gaps"], "messages": messages,
+            "mode": "recognize" if primary is not None else "generate",
+            "intent": out.get("intent"),
+            "attachments": _attachment_view(session | {"attachments_json": attachments})}
 
 
 @app.get("/api/form/{sid}")
 def form_session_state(sid: str, user: dict = User) -> dict:
     """새로고침·재진입 복원용."""
     session = _my_session(sid, user)
+    primary = _primary_attachment(session)
     return {"session_id": session["id"], "project_id": session["project_id"],
             "status": session["status"], "messages": session["messages_json"],
             "spec_json": session["spec_json"], "turn_count": session["turn_count"],
-            "spec_complete": session["status"] == "spec_complete"}
+            "spec_complete": session["status"] == "spec_complete",
+            "mode": "recognize" if primary is not None else "generate",
+            "attachments": _attachment_view(session),
+            "gaps": (fg.recognize_gaps(session["spec_json"] or {}, primary["structural"],
+                                       session["messages_json"])
+                     if primary is not None else fg.rubric_gaps(session["spec_json"] or {}))}
+
+
+@app.post("/api/form/{sid}/register")
+def form_register(sid: str, user: dict = User) -> dict:
+    """F6-5 등록 확정. 원본 파일을 **다시 쓰지 않고** 그대로 양식으로 삼는다(E1).
+
+    §5.3대로 동기 처리다 — LLM이 파일을 저작하지 않아 잡·폴링이 필요하지 않다.
+    """
+    _require_consent(user)
+    session = _my_session(sid, user)
+    primary = _primary_attachment(session)
+    if primary is None:
+        raise HTTPException(400, "등록할 양식 파일이 없습니다. xlsx 양식을 첨부해주세요.")
+    if session["status"] == "closed":
+        raise HTTPException(400, "이미 끝난 문답입니다. 새로 시작해주세요.")
+
+    spec = session.get("spec_json") or {}
+    gaps = fg.recognize_gaps(spec, primary["structural"], session["messages_json"])
+    if gaps:
+        # 화면의 등록 버튼은 서버 판정으로만 켜지지만, 직접 호출도 막는다
+        raise HTTPException(400, "항목 정보가 아직 확정되지 않았습니다: " + ", ".join(gaps[:5]))
+
+    # 확장자 위변조 방지 — 등록 직전에 실제 바이트를 다시 본다 (인지 §7·§9.3)
+    data = store.get_object(store.FORM_BUCKET, primary["storage_path"])
+    if not data.startswith(b"PK\x03\x04"):
+        raise HTTPException(400, "양식 파일이 xlsx가 아닙니다(내용이 zip 형식이 아닙니다).")
+
+    template_id = store.register_form_template(session["project_id"], session["id"], spec,
+                                               primary["storage_path"])
+    store.save_field_rules(template_id, fg.derive_field_rules(spec))
+    store.update_intake_session(session["id"], status="closed")
+    store.log_action(user.get("id"), "양식 등록 완료",
+                     f"{spec.get('form_title')} · 항목 {len(spec.get('fields') or [])}개")
+    tables = fg.selected_tables(spec, primary["structural"])
+    return {
+        "template_id": template_id,
+        "form_title": spec.get("form_title"),
+        "source": "recognized_external",
+        "original_name": primary.get("original_name"),
+        "sheets": _structure_preview(spec, primary["structural"]),
+        "rules": fg.rules_for_aggregate(spec),
+        "notes": [f"'{primary.get('original_name')}'을 고친 곳 없이 그대로 등록했습니다. "
+                  "레이아웃·서식은 원본 그대로이며, 바꿀 수 있는 것은 작성기준입니다.",
+                  f"회신받을 표: {', '.join(t.get('name') or '' for t in tables)}"]
+        + ([f"이 파일에서 표 {len((primary['structural'].get('sheets') or []))}개를 찾아 "
+            f"{len(tables)}개를 골랐습니다."]
+           if len(primary["structural"].get("sheets") or []) > len(tables) else []),
+    }
 
 
 @app.post("/api/form/{sid}/generate")

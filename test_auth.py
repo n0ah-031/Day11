@@ -508,6 +508,127 @@ def test_form_persistence(client: TestClient):
         fg._client = real_client
 
 
+def test_form_recognize(client: TestClient):
+    """F6 기존 양식 인지·등록 — 원본을 고치지 않고 등록하고, 작성기준이 남아야 한다.
+
+    여기서만 잡히는 것이 있다 — 등록은 첨부 객체를 **그대로** 양식 파일로 삼으므로
+    Storage 경로 규칙(계정 삭제 시 정리되는 자리)과 바이트 무변경을 실제 Supabase를
+    상대로 확인해야 한다.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    import store
+    import formgen as fg
+    from test_formgen import Stub
+
+    tmp = Path(tempfile.mkdtemp(prefix="f6-test-"))
+    real_client = fg._client
+    try:
+        # 배포 전 빈 양식(헤더 아래가 전부 비어 있는 실제 형태)을 만들어 그것을 올린다
+        spec = _form_spec()
+        form_path = tmp / "zz-test 기존양식.xlsx"
+        fg.materialize(_form_workbook(spec), form_path)
+        original = form_path.read_bytes()
+
+        # 헤더는 `*`가 붙은 그대로다. 항목명이 헤더와 한 글자라도 다르면 취합에서
+        # 그 열을 못 찾으므로, 인지 사양의 name은 헤더 문자열이어야 한다
+        headers = [f["name"] + ("*" if f["required"] else "") for f in spec["fields"]]
+        recognized = {"form_title": spec["form_title"], "locale": "ko",
+                      "selected_sheets": ["양식"],
+                      "fields": [dict(f, name=h, confidence="high")
+                                 for f, h in zip(spec["fields"], headers)]}
+
+        # png는 아예 받지 않는다(인지 §6.4)
+        bad = client.post("/api/form/attachments",
+                          files=[("files", ("그림.png", b"\x89PNG\r\n", "image/png"))])
+        assert bad.status_code == 400 and "xlsx" in bad.json()["detail"], bad.text
+
+        # 등록 대상 xlsx + 참고용 hwpx를 함께 올린다
+        up = client.post("/api/form/attachments", files=[
+            ("files", (form_path.name, original, server.XLSX_MIME)),
+            ("files", ("참고.hwpx", hwpx_bytes("ref"), server.HWPX_MIME)),
+        ])
+        assert up.status_code == 200, up.text
+        made = up.json()
+        sid, project_id = made["session_id"], made["project_id"]
+        assert made["mode"] == "recognize", made
+        xlsx_att = next(a for a in made["attachments"] if a["kind"] == "xlsx")
+        hwpx_att = next(a for a in made["attachments"] if a["kind"] == "hwpx")
+        assert xlsx_att["primary"] is True and xlsx_att["tables"][0]["headers"] == headers, xlsx_att
+        assert hwpx_att["primary"] is False and "참고 자료로만" in hwpx_att["note"], hwpx_att
+
+        # 문답 — 1턴은 항목이 빠져 있어 완료로 인정되지 않는다(헤더 1:1 루브릭)
+        short = {k: v for k, v in recognized.items()}
+        short["fields"] = recognized["fields"][:-1]
+        stub = Stub([
+            {"intent": "recognize", "reply": "이렇게 읽었습니다", "spec_json": short,
+             "recognize_complete": True},
+            {"intent": "recognize", "reply": "확정했습니다", "spec_json": recognized,
+             "recognize_complete": True},
+        ])
+        fg._client = lambda: stub
+
+        first = client.post(f"/api/form/{sid}/messages",
+                           json={"message": "이 양식 그대로 받을 거야"})
+        assert first.status_code == 200, first.text
+        assert first.json()["mode"] == "recognize" and first.json()["intent"] == "recognize"
+        assert first.json()["spec_complete"] is False, first.json()
+        assert any(headers[-1] in g for g in first.json()["gaps"]), first.json()["gaps"]
+        # 확정되지 않은 상태에서 등록을 직접 부르면 막힌다
+        assert client.post(f"/api/form/{sid}/register").status_code == 400
+
+        second = client.post(f"/api/form/{sid}/messages", json={"message": "비고만 선택이야"})
+        assert second.status_code == 200 and second.json()["spec_complete"] is True, second.text
+        # 새로고침 복원 — 모드·첨부·사양이 되살아나야 한다
+        restored = client.get(f"/api/form/{sid}").json()
+        assert restored["mode"] == "recognize" and restored["gaps"] == [], restored
+        assert len(restored["attachments"]) == 2, restored["attachments"]
+
+        # 등록 — 동기 응답이다(잡·폴링 없음)
+        reg = client.post(f"/api/form/{sid}/register")
+        assert reg.status_code == 200, reg.text
+        out = reg.json()
+        template_id = out["template_id"]
+        assert out["source"] == "recognized_external" and out["sheets"][0]["name"] == "양식", out
+        assert out["rules"][headers[0]] == {"required": spec["fields"][0]["required"]}, out["rules"]
+
+        row = store.get_form_template(template_id)
+        assert row["status"] == "done" and row["source"] == "recognized_external", row
+        # 원본이 산출물이므로 저작물 명세는 없는 것이 정상이다(E1)
+        assert row["workbook_json"] is None, row["workbook_json"]
+        assert row["intake_session_id"] == sid, row
+        # Storage 경로는 프로젝트 폴더 바로 아래 평면 — 계정 삭제 시 정리되는 자리다
+        assert row["file_url"].startswith(f"{project_id}/"), row["file_url"]
+        assert "/" not in row["file_url"][len(project_id) + 1:], row["file_url"]
+
+        # **무변경 등록**(E1의 핵심 보증) — 내려받은 바이트가 올린 것과 같아야 한다
+        dl = client.get(f"/api/form/template/{template_id}/download")
+        assert dl.status_code == 200 and dl.content == original, \
+            (dl.status_code, len(dl.content), len(original))
+
+        # 작성기준이 남고, 취합이 그대로 먹는 형태로 내려온다 (F6-6)
+        saved = store._rest("GET", "/field_rules",
+                            params={"form_template_id": f"eq.{template_id}",
+                                    "select": "field_name,rule_type"}).json()
+        assert {r["field_name"] for r in saved} == set(headers), saved
+        rules = client.get(f"/api/form/templates/{template_id}/rules").json()["rules"]
+        assert set(rules) == set(headers), rules
+        listed = client.get("/api/form/templates").json()["templates"]
+        mine = next(t for t in listed if t["id"] == template_id)
+        assert mine["source"] == "recognized_external" and mine["field_count"] == len(headers), mine
+
+        assert store.get_intake_session(sid)["status"] == "closed", "등록 후 문답은 닫힌다"
+        assert client.post(f"/api/form/{sid}/register").status_code == 400, "두 번 등록되면 안 된다"
+        actions = {r["action"] for r in store.list_logs(limit=50) if r["actor"] == EMP}
+        assert "양식 등록 완료" in actions, actions
+        print("  ✓ F6 인지·등록(무변경 등록·헤더 1:1·작성기준·첨부 구분)")
+    finally:
+        fg._client = real_client
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_admin_console(client: TestClient):
     """Admin API는 관리자만 쓸 수 있고, 변경은 감사 로그에 남아야 한다 (F4-3)."""
     import manage_users
@@ -633,7 +754,8 @@ def _delete_test_logs() -> None:
                "Content-Type": "application/json"}
     base = os.environ["SUPABASE_URL"].rstrip("/")
     for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료",
-                   "한글 병합 완료", "AI 전송 동의", "양식 생성 완료"):
+                   "한글 병합 완료", "AI 전송 동의", "양식 생성 완료",
+                   "양식 등록 완료"):
         httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
                      params={"actor_id": "is.null", "action": f"eq.{action}"})
 
@@ -688,6 +810,7 @@ def main() -> int:
         test_persistence(client)
         test_hwpx_persistence(client)
         test_form_persistence(client)
+        test_form_recognize(client)
         test_admin_console(client)
         test_public_key_reads_nothing()
         test_logout(client)

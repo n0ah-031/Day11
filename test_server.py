@@ -107,6 +107,11 @@ def test_form_requires_store():
     assert client.post("/api/form/없는세션/messages", json={"message": "x"}).status_code == 404
     assert client.get("/api/form/없는세션").status_code == 404
     assert client.get("/api/form/template/없는것/download").status_code == 404
+    # F6 등록도 같은 전제를 쓴다 — 기록이 없으면 등록 자체가 성립하지 않는다
+    att = client.post("/api/form/attachments",
+                      files=[("files", ("양식.xlsx", b"PK\x03\x04", server.XLSX_MIME))])
+    assert att.status_code == 503 and "Supabase" in att.json()["detail"], att.text
+    assert client.post("/api/form/없는세션/register").status_code == 404
     # 인증이 꺼져 있으면 동의는 통과 상태로 본다(로컬 개발)
     assert client.get("/api/form/consent").json() == {"consented": True}
     assert client.get("/api/form/templates").json() == {"templates": []}

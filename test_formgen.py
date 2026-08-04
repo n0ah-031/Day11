@@ -280,6 +280,149 @@ def test_rules_bridge(tmp: Path):
     print("  ✓ 작성기준 파생 + 취합 엔진 연결(선택 항목 오탐 없음, 필수 누락은 잡음)")
 
 
+def test_read_structure(tmp: Path):
+    """F6 구조 추출 — 빈 양식과 예시 데이터 양식 양쪽에서 헤더·형식·코드표가 나온다."""
+    # ① 빈 양식(배포 전) — F1이 만든 양식을 그대로 읽는다. 헤더 아래가 전부 비어 있다.
+    blank = tmp / "빈양식.xlsx"
+    fg.materialize(GOOD_WB, blank)
+    st = fg.read_structure(blank)
+    sheet = st["sheets"][0]
+    assert sheet["header_row"] == 3, sheet["header_row"]
+    assert sheet["headers"] == ["부서명*", "집행일자*", "집행금액*", "비고"], sheet["headers"]
+    assert sheet["sample_rows"] == [], sheet["sample_rows"]      # 빈 양식이면 빈 배열(E5)
+    dv = {c["letter"]: c["existing_validation"] for c in sheet["columns"]}
+    assert dv["A"]["source"] == ["기획팀", "인사팀"], dv["A"]     # 기존 드롭다운 = 코드표 근거
+    assert dv["B"]["type"] == "date" and dv["D"] is None, dv
+
+    # ② 예시 데이터가 든 양식 — 표시형식·샘플이 채워지고 성명 열 값은 담지 않는다(§9.2 J4)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "교육이수"
+    ws["A1"] = "2026년 상반기 교육 이수 현황"          # 제목 행(단일 병합 제목 흉내)
+    for col, head in zip("ABCD", ["부서명", "성명", "이수일자", "이수시간"]):
+        ws[f"{col}2"] = head
+    ws.append(["기획팀", "홍길동", "2026-03-02", 8])
+    ws.append(["인사팀", "김철수", "2026-03-05", 4])
+    ws["C3"].number_format = "yyyy-mm-dd"
+    filled = tmp / "예시.xlsx"
+    wb.save(filled)
+
+    st2 = fg.read_structure(filled)
+    s2 = st2["sheets"][0]
+    assert s2["headers"] == ["부서명", "성명", "이수일자", "이수시간"], s2["headers"]
+    assert s2["header_row"] == 2, s2["header_row"]
+    fmt = {c["header"]: c["existing_number_format"] for c in s2["columns"]}
+    assert fmt["이수일자"] == "yyyy-mm-dd", fmt        # 형식은 추측이 아니라 파일에 적힌 값
+    # 형식을 지정하지 않은 열은 근거가 없다는 뜻이다. `General`을 그대로 올려보내면 모델이
+    # 그걸 입력 형식으로 옮겨 적어 화면에 'General'이 뜬다(실측에서 그랬다)
+    assert fmt["부서명"] is None, fmt
+    assert len(s2["sample_rows"]) == 2, s2["sample_rows"]
+    assert s2["sample_rows"][0]["부서명"] == "기획팀"
+    assert s2["sample_rows"][0]["성명"] == "(성명 마스킹)", s2["sample_rows"][0]
+
+    # ③ 등록 대상이 아닌 것은 사유를 들고 막는다
+    (tmp / "문서.hwpx").write_bytes(b"PK\x03\x04")
+    for bad, why in [(tmp / "문서.hwpx", "xlsx"), (tmp / "없는파일.xlsx", "열 수 없")]:
+        try:
+            fg.read_structure(bad)
+            raise AssertionError(f"{bad.name}이 통과했습니다")
+        except fg.FormGenError as exc:
+            assert why in str(exc), exc
+
+    # ④ 표가 없는 파일(안내문만) — 등록할 근거가 없으므로 실패
+    guide = openpyxl.Workbook()
+    guide.active["A1"] = "작성 안내: 각 지사는 기한 내 제출하십시오"
+    guide.save(tmp / "안내.xlsx")
+    try:
+        fg.read_structure(tmp / "안내.xlsx")
+        raise AssertionError("표가 없는 파일이 통과했습니다")
+    except fg.FormGenError as exc:
+        assert "표" in str(exc), exc
+    print("  ✓ 구조 추출(빈 양식·예시 데이터·기존 코드표·성명 마스킹·등록 불가 사유)")
+
+
+def test_recognize_turn(tmp: Path):
+    """F6 인지 턴 — 의도 판정과 헤더 1:1 루브릭이 임의 판정을 막는다."""
+    structural = {"sheets": [{"name": "예산집행", "header_row": 3,
+                              "headers": ["부서명*", "집행일자*", "집행금액*", "비고"],
+                              "columns": [], "sample_rows": []}]}
+    # 헤더 그대로가 항목명이어야 한다 — 취합이 이 이름으로 열을 찾는다
+    exact = json.loads(json.dumps(GOOD_SPEC))
+    for f, head in zip(exact["fields"], structural["sheets"][0]["headers"]):
+        f["name"], f["confidence"] = head, "high"
+
+    # ① 이름을 다듬어 내려주면(별표 제거) 완료로 인정하지 않고 무엇이 어긋났는지 밝힌다
+    trimmed = json.loads(json.dumps(exact))
+    trimmed["fields"][0]["name"] = "부서명"
+    stub = Stub([{"intent": "recognize", "reply": "이렇게 읽었습니다",
+                  "spec_json": trimmed, "recognize_complete": True}])
+    out = fg.recognize_turn([{"role": "user", "content": "이 양식 그대로 쓸게"}], {},
+                            structural, "m", client=stub)
+    assert out["spec_complete"] is False, out
+    assert "양식의 '부서명*' 항목 정보" in out["gaps"], out["gaps"]
+    assert "'부서명'은 양식에 없는 항목입니다" in out["gaps"], out["gaps"]
+
+    # ② 1:1로 맞으면 완료
+    stub = Stub([{"intent": "recognize", "reply": "확인했습니다",
+                  "spec_json": exact, "recognize_complete": True}])
+    out = fg.recognize_turn([{"role": "user", "content": "이 양식 그대로"}], {},
+                            structural, "m", client=stub)
+    assert out["spec_complete"] is True and out["gaps"] == [], out
+
+    # ③ 의도가 generate면 등록으로 넘기지 않는다(첨부는 참고가 된다 — F1-3)
+    stub = Stub([{"intent": "generate", "reply": "새로 만들어 드릴까요?",
+                  "spec_json": exact, "recognize_complete": True}])
+    out = fg.recognize_turn([{"role": "user", "content": "이거 비슷하게 새로"}], {},
+                            structural, "m", client=stub)
+    assert out["intent"] == "generate" and out["spec_complete"] is False, out
+
+    # ④ 판정을 못 받으면 ambiguous로 떨어뜨려 사용자에게 되묻는다(R6)
+    stub = Stub([{"reply": "음", "spec_json": exact, "recognize_complete": True}])
+    out = fg.recognize_turn([{"role": "user", "content": "?"}], {}, structural, "m", client=stub)
+    assert out["intent"] == "ambiguous" and out["spec_complete"] is False, out
+
+    # ④-2 근거 없는 항목(confidence low)은 확정으로 보지 않는다 — 실측에서 모델이 근거 없이
+    # 전 항목을 '선택'으로 내려보냈고, 그대로 등록하면 검토가 누락을 못 잡는다
+    unsure = json.loads(json.dumps(exact))
+    unsure["fields"][2]["confidence"] = "low"
+    stub = Stub([{"intent": "recognize", "reply": "필수 항목을 알려주세요",
+                  "spec_json": unsure, "recognize_complete": True}])
+    out = fg.recognize_turn([{"role": "user", "content": "이 양식 그대로"}], {},
+                            structural, "m", client=stub)
+    assert out["spec_complete"] is False, out
+    assert f"'{structural['sheets'][0]['headers'][2]}' 확인 필요" in out["gaps"], out["gaps"]
+
+    # ⑤ 표가 여러 개면 어느 표로 받을지 정해야 한다(실제 양식은 가이드·대장이 섞여 있다)
+    many = {"sheets": [structural["sheets"][0],
+                       {"name": "<참고> 작성 가이드", "header_row": 2,
+                        "headers": ["항목", "문제점", "개선방안"],
+                        "columns": [], "sample_rows": []}]}
+    stub = Stub([{"intent": "recognize", "reply": "이 표로 받겠습니다",
+                  "spec_json": exact, "recognize_complete": True}])
+    out = fg.recognize_turn([{"role": "user", "content": "이 양식 그대로"}], {},
+                            many, "m", client=stub)
+    assert out["spec_complete"] is False, out
+    assert out["gaps"][0].startswith("회신받을 표"), out["gaps"]
+    assert "<참고> 작성 가이드" in out["gaps"][0], out["gaps"][0]
+
+    # 표를 고르면 고른 표의 헤더만 1:1 대상이다(가이드 표의 헤더를 요구하지 않는다)
+    picked = json.loads(json.dumps(exact)) | {"selected_sheets": ["예산집행"]}
+    stub = Stub([{"intent": "recognize", "reply": "확인", "spec_json": picked,
+                  "recognize_complete": True}])
+    out = fg.recognize_turn([{"role": "user", "content": "첫 표로"}], {}, many, "m", client=stub)
+    assert out["spec_complete"] is True and out["gaps"] == [], out
+
+    # ⑥ 턴 상한에서 마감 지시 + 전송 payload 마스킹
+    stub = Stub([{"intent": "recognize", "reply": "마감", "spec_json": exact,
+                  "recognize_complete": True}])
+    talk = [{"role": "user", "content": "010-1234-5678 로 연락"}
+            for _ in range(fg.RECOGNIZE_TURN_LIMIT)]
+    fg.recognize_turn(talk, {}, structural, "m", client=stub)
+    assert "턴 수 상한" in stub.seen[0], stub.seen[0][:200]
+    assert "010-1234-5678" not in stub.seen[0], "마스킹되지 않았습니다"
+    print("  ✓ 인지 턴(의도 판정·헤더 1:1 루브릭·ambiguous 폴백·턴 상한·마스킹)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="formgen-test-"))
     try:
@@ -290,6 +433,8 @@ def main() -> int:
         test_author_retry()
         test_materialize(tmp)
         test_rules_bridge(tmp)
+        test_read_structure(tmp)
+        test_recognize_turn(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("\n전체 통과")

@@ -323,11 +323,15 @@ def list_logs(q: str = "", limit: int = 200) -> list[dict]:
 FORM_BUCKET = RESULT_BUCKET       # 생성된 양식도 results 버킷에 둔다(버킷을 늘리지 않는다)
 
 
-def create_intake_session(project_id: str, first_message: dict) -> dict:
-    """문답 세션을 시작한다. 프로젝트당 active 세션은 하나뿐이다(부분 유니크 인덱스)."""
+def create_intake_session(project_id: str, first_message: dict | None = None) -> dict:
+    """문답 세션을 시작한다. 프로젝트당 active 세션은 하나뿐이다(부분 유니크 인덱스).
+
+    첨부가 먼저 오는 경로(F6)에서는 첫 메시지가 아직 없다 — 빈 대화로 시작한다.
+    """
     return _insert("intake_sessions", {
         "project_id": project_id, "status": "active",
-        "messages_json": [first_message], "spec_json": {}, "turn_count": 0,
+        "messages_json": [first_message] if first_message else [],
+        "spec_json": {}, "turn_count": 0,
     })
 
 
@@ -385,6 +389,33 @@ def put_form(project_id: str, template_id: str, local_path: Path, version: int =
     return path
 
 
+def put_attachment(project_id: str, local_path: Path, original_name: str) -> str:
+    """문답 첨부를 Storage에 올린다 (F1-3·F6-2).
+
+    경로는 다른 용도와 같은 규칙 — **프로젝트 폴더 바로 아래 평면**이다(put_form 주석 참조).
+    F6 등록은 이 객체를 그대로 양식 파일로 삼는다. 다시 쓰지 않으므로 등록 전후 바이트가
+    같다는 것이 구조적으로 보장된다(인지 §7 E1 무변경 등록).
+    """
+    suffix = Path(original_name).suffix.lower() or ".bin"
+    path = f"{project_id}/attach_{uuid.uuid4().hex}{suffix}"
+    mime = XLSX_MIME if suffix == ".xlsx" else HWPX_MIME if suffix == ".hwpx" else None
+    _put_object(FORM_BUCKET, path, local_path.read_bytes(), mime)
+    return path
+
+
+def register_form_template(project_id: str, session_id: str, spec: dict, file_url: str) -> str:
+    """등록된 외부 양식을 기록한다 (F6-5).
+
+    F1과 달리 workbook_json이 없다 — 원본 파일 자체가 산출물이라 셀 단위 재현 명세가
+    없는 것이 정상이다(인지 E1). 그래서 `source`로 구분한다(20260804060000 참조).
+    구조 추출 스냅샷은 남기지 않는다 — 원본이 무변형으로 있어 언제든 다시 뽑는다.
+    """
+    return _insert("form_templates", {
+        "project_id": project_id, "intake_session_id": session_id, "spec_json": spec,
+        "status": "done", "version": 1, "output_format": "xlsx",
+        "source": "recognized_external", "file_url": file_url})["id"]
+
+
 def save_field_rules(template_id: str, rows: list[dict]) -> None:
     """spec에서 파생한 작성기준을 갈아끼운다(F1-5). 재생성 시 이전 것을 남기지 않는다."""
     _rest("DELETE", "/field_rules", params={"form_template_id": f"eq.{template_id}"})
@@ -395,7 +426,7 @@ def save_field_rules(template_id: str, rows: list[dict]) -> None:
 def list_form_templates(owner_id: str, limit: int = 100) -> list[dict]:
     """본인이 만든 양식 목록. 취합 화면에서 작성기준을 고르는 재료다 (F1-6)."""
     res = _rest("GET", "/form_templates", params={
-        "select": "id,project_id,status,version,spec_json,file_url,created_at,"
+        "select": "id,project_id,status,version,spec_json,file_url,source,created_at,"
                   "projects!inner(owner_id,name)",
         "projects.owner_id": f"eq.{owner_id}", "status": "eq.done",
         "order": "created_at.desc", "limit": str(limit)})
@@ -405,6 +436,7 @@ def list_form_templates(owner_id: str, limit: int = 100) -> list[dict]:
         out.append({
             "id": row["id"], "project_id": row["project_id"], "version": row["version"],
             "created_at": row["created_at"], "file_url": row.get("file_url"),
+            "source": row.get("source") or "ai_generated",
             "title": spec.get("form_title") or (row.get("projects") or {}).get("name") or "양식",
             "field_count": len(spec.get("fields") or []),
         })

@@ -198,7 +198,10 @@
 <h2 class="text-headline-md font-headline-md">AI 전송 동의</h2>
 <p class="mt-3 text-body-md font-body-md text-on-surface-variant">
 양식 사양을 정하려면 입력하신 내용이 <strong class="text-on-surface">외부 AI 서비스로 전송</strong>됩니다.
-주민등록번호·전화번호·이메일은 전송 전에 자동으로 가려지지만, 그 밖의 민감한 내용은 입력하지 말아주세요.
+기존 양식을 첨부하면 <strong class="text-on-surface">그 양식의 구조와 샘플 값 일부</strong>도 함께 전송됩니다
+(예시 데이터가 들어 있을 수 있습니다).
+주민등록번호·전화번호·이메일은 전송 전에 자동으로 가려지고 성명 열의 값은 보내지 않지만,
+그 밖의 민감한 내용은 입력하지 말아주세요.
 </p>
 <div class="mt-6 flex gap-3 justify-end">
 <a href="aggregate.html" class="px-5 py-2.5 rounded-xl border border-outline-variant text-label-md font-label-md">돌아가기</a>
@@ -224,6 +227,14 @@
   class="flex-1 bg-transparent border-0 p-0 resize-none text-body-md text-on-surface placeholder:text-on-surface-variant focus:ring-0"></textarea>
 <button id="start" class="shrink-0 px-5 py-2.5 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 disabled:opacity-40 transition-all">시작</button>
 </div>
+<div class="mt-3 flex flex-wrap items-center gap-3">
+<label class="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-outline-variant text-body-sm font-body-sm text-on-surface-variant hover:border-primary hover:text-primary cursor-pointer transition-colors">
+<span class="material-symbols-outlined text-[18px]">attach_file</span>파일 첨부
+<input id="attach" type="file" multiple accept=".xlsx,.hwpx" class="hidden">
+</label>
+<span class="text-body-sm font-body-sm text-on-surface-variant">이미 쓰는 양식(xlsx)을 붙이면 <strong class="text-on-surface">그대로 등록</strong>할 수 있습니다. hwpx는 참고 자료로만 쓰입니다.</span>
+</div>
+<div id="attached" class="mt-3 flex flex-col gap-2"></div>
 <div id="chips" class="mt-4 flex flex-wrap gap-2"></div>
 </section>
 
@@ -231,20 +242,31 @@
   <!-- 좌: 문답 -->
   <section class="rounded-xl glass-card shadow-soft p-6">
   <h2 class="text-headline-md font-headline-md">문답</h2>
+  <div id="work-attached" class="mt-4 flex flex-col gap-2"></div>
   <div id="chat" class="mt-4 flex flex-col gap-3"></div>
+  <div id="branch" class="hidden mt-3 flex flex-wrap gap-3">
+    <button data-say="첨부한 양식을 그대로 등록해줘"
+      class="px-4 py-2 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 transition-all">첨부한 파일 그대로 등록</button>
+    <button data-say="첨부는 참고만 하고 새 양식을 만들어줘"
+      class="px-4 py-2 rounded-xl border border-outline-variant text-label-md font-label-md font-semibold hover:border-primary transition-all">새 양식 만들기</button>
+  </div>
   <div id="thinking" class="hidden mt-3 flex items-center gap-2 text-body-sm font-body-sm text-on-surface-variant">
     <span class="material-symbols-outlined animate-spin text-primary">progress_activity</span><span id="phase">생각 중…</span>
   </div>
   <div id="answer-row" class="mt-4 flex items-end gap-3 rounded-xl bg-surface border border-outline-variant px-4 py-3 glow-border">
   <textarea id="answer" rows="2" placeholder="답변을 입력하세요"
     class="flex-1 bg-transparent border-0 p-0 resize-none text-body-md text-on-surface placeholder:text-on-surface-variant focus:ring-0"></textarea>
+  <label for="attach" title="파일 첨부"
+    class="shrink-0 p-2.5 rounded-xl border border-outline-variant text-on-surface-variant hover:border-primary hover:text-primary cursor-pointer transition-colors">
+    <span class="material-symbols-outlined text-[20px] align-middle">attach_file</span></label>
   <button id="send" class="shrink-0 px-5 py-2.5 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 disabled:opacity-40 transition-all">보내기</button>
   </div>
   </section>
 
-  <!-- 우: 지금까지 확인된 사양 -->
+  <!-- 우: 지금까지 확인된 사양 (인지 모드에서는 인식된 양식 정보) -->
   <aside class="rounded-xl glass-card shadow-soft p-6 lg:sticky lg:top-24">
-  <h2 class="text-headline-md font-headline-md">지금까지 확인된 사양</h2>
+  <h2 id="spec-title" class="text-headline-md font-headline-md">지금까지 확인된 사양</h2>
+  <div id="mode-note" class="hidden mt-3 rounded-xl border border-primary/40 bg-primary/10 px-4 py-3 text-body-sm font-body-sm"></div>
   <div id="spec" class="mt-4 text-body-sm font-body-sm text-on-surface-variant">아직 확인된 내용이 없습니다.</div>
   <div id="gaps" class="hidden mt-4 rounded-xl border border-tertiary/40 bg-tertiary/10 px-4 py-3"></div>
   <button id="generate" disabled title="사양이 확정되면 켜집니다"
@@ -255,7 +277,7 @@
 
 <!-- 결과 -->
 <section id="result-card" class="hidden mt-md rounded-xl glass-card shadow-soft p-6">
-<h2 class="text-headline-md font-headline-md">생성 완료</h2>
+<h2 id="result-heading" class="text-headline-md font-headline-md">생성 완료</h2>
 <p id="result-title" class="mt-2 text-body-md font-body-md text-on-surface-variant"></p>
 <div id="preview" class="mt-4 overflow-x-auto"></div>
 <div id="result-notes" class="mt-4"></div>
@@ -274,7 +296,9 @@
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  let state = { sid: null, complete: false, busy: false };
+  // mode: generate(F1 저작) | recognize(F6 등록). 서버가 내려주는 값만 믿는다 —
+  // 첨부한 xlsx를 그대로 쓸지는 AI가 판정하고(F6-1), 화면이 자체 판정하지 않는다.
+  let state = { sid: null, complete: false, busy: false, mode: 'generate', pending: [] };
 
   function paintTheme() {
     $('theme-icon').textContent =
@@ -288,6 +312,12 @@
   paintTheme();
 
   const fail = (msg) => { $('error').textContent = msg; $('error').classList.remove('hidden'); };
+
+  // 진행 중인 문답을 기억한다. 새로고침·다른 화면에 갔다 와도 확정된 사양을 두고
+  // 처음부터 다시 묻지 않기 위해서다(유료 호출을 다시 태우는 셈이 된다).
+  const SID_KEY = 'chwihap-form-sid';
+  const remember = (sid) => { try { sessionStorage.setItem(SID_KEY, sid || ''); } catch (e) {} };
+  const remembered = () => { try { return sessionStorage.getItem(SID_KEY); } catch (e) { return null; } };
 
   async function api(path, opts) {
     const res = await fetch(path, opts);
@@ -353,6 +383,9 @@
             <span class="text-on-surface font-semibold">${esc(f.name)}</span>
             <span class="ml-1">${esc(TYPE_LABEL[f.type] || f.type || '')}</span>
             <span class="ml-1 ${f.required ? 'text-primary font-semibold' : ''}">${f.required ? '필수' : '선택'}</span>
+            ${f.confidence ? `<span class="ml-1 px-2 py-0.5 rounded-full text-label-sm font-label-sm ${
+              f.confidence === 'low' ? 'bg-tertiary/20 text-on-surface' : 'bg-secondary/20 text-on-surface-variant'
+            }">${f.confidence === 'low' ? '확인 필요' : '확인됨'}</span>` : ''}
             ${f.format ? `<div class="mt-0.5">${esc(f.format)}</div>` : ''}
           </li>`).join('')}</ul>` : ''}
         ${spec.layout_hints ? `<p class="mt-3">${esc(spec.layout_hints)}</p>` : ''}`;
@@ -366,48 +399,118 @@
     }
   }
 
+  /** 첨부 목록 — 무엇이 등록 대상이고 무엇이 참고인지 밝힌다 (F6-2). */
+  function renderAttachments(list) {
+    const pending = state.pending.map((f) =>
+      `<div class="rounded-lg border border-outline-variant px-3 py-2 text-body-sm font-body-sm text-on-surface-variant">
+        ${esc(f.name)} <span class="ml-1">— 올릴 준비됨</span></div>`);
+    const done = (list || []).map((a) => {
+      const tables = (a.tables || []).map((t) =>
+        `${esc(t.name)} (항목 ${t.headers.length}개)`).join(' · ');
+      return `<div class="rounded-lg border ${a.primary ? 'border-primary/50 bg-primary/5' : 'border-outline-variant'} px-3 py-2 text-body-sm font-body-sm">
+        <span class="text-on-surface font-semibold">${esc(a.name)}</span>
+        <span class="ml-2 ${a.primary ? 'text-primary font-semibold' : 'text-on-surface-variant'}">${
+          a.primary ? '등록 대상' : '참고 자료'}</span>
+        ${tables ? `<div class="mt-1 text-on-surface-variant">${tables}</div>` : ''}
+        ${a.note ? `<div class="mt-1 text-on-surface-variant">${esc(a.note)}</div>` : ''}
+      </div>`;
+    });
+    const html = [...done, ...pending].join('');
+    $('attached').innerHTML = html;
+    $('work-attached').innerHTML = html;      // 시작 카드가 숨은 뒤에도 보여야 한다
+  }
+
+  $('attach').addEventListener('change', (e) => {
+    state.pending = [...state.pending, ...e.target.files];
+    e.target.value = '';                       // 같은 파일을 다시 고를 수 있게
+    renderAttachments(state.attachments);
+    $('attached').scrollIntoView({ block: 'nearest' });
+  });
+
+  /** 첨부를 먼저 올린다 — 그 파일이 첫 턴의 의도 판정 재료다(F6-1). */
+  async function flushAttachments() {
+    if (!state.pending.length) return;
+    const fd = new FormData();
+    if (state.sid) fd.append('session_id', state.sid);
+    for (const f of state.pending) fd.append('files', f);
+    const up = await api('/api/form/attachments', { method: 'POST', body: fd });
+    state.sid = up.session_id;
+    remember(up.session_id);
+    state.pending = [];
+    state.attachments = up.attachments;
+    renderAttachments(up.attachments);
+  }
+
   function applyTurn(out) {
     renderChat(out.messages || []);
+    if (out.attachments) { state.attachments = out.attachments; renderAttachments(out.attachments); }
+    if (out.mode) state.mode = out.mode;
     renderSpec(out.spec_json, out.gaps);
+    const recognize = state.mode === 'recognize';
+    $('spec-title').textContent = recognize ? '인식된 양식 정보' : '지금까지 확인된 사양';
+    $('generate').textContent = recognize ? '이대로 등록하기' : '양식 생성';
+    $('mode-note').classList.toggle('hidden', !recognize);
+    if (recognize) {
+      $('mode-note').innerHTML = '첨부한 양식을 <strong>고치지 않고 그대로</strong> 등록합니다. '
+        + '레이아웃·서식은 원본 그대로이고, 정하는 것은 회신본 검토에 쓸 작성기준입니다.';
+    }
+    // 의도가 모호하면 사용자가 직접 고르게 한다 — 되묻기만 하면 갇힐 수 있다(R6)
+    $('branch').classList.toggle('hidden', out.intent !== 'ambiguous');
     state.complete = !!out.spec_complete;
     $('generate').disabled = !state.complete;
     $('gen-hint').textContent = state.complete
-      ? '사양이 확정되었습니다. 생성할 수 있습니다.'
-      : '사양이 확정되면 버튼이 켜집니다.';
+      ? (recognize ? '항목 정보가 확정되었습니다. 등록할 수 있습니다.'
+                   : '사양이 확정되었습니다. 생성할 수 있습니다.')
+      : (recognize ? '항목 정보가 확정되면 버튼이 켜집니다.' : '사양이 확정되면 버튼이 켜집니다.');
   }
 
-  $('start').addEventListener('click', async () => {
-    const message = $('first').value.trim();
-    if (!message) return;
+  async function converse(message, label) {
     $('error').classList.add('hidden');
     $('work').classList.remove('hidden');
-    busy(true, '사양을 정리하는 중…');
+    busy(true, label);
     try {
-      const out = await post('/api/form/session', { message });
-      state.sid = out.session_id;
+      await flushAttachments();
+      // 첨부가 세션을 먼저 만들었으면 첫 발화도 문답 경로로 보낸다
+      const out = state.sid
+        ? await post(`/api/form/${state.sid}/messages`, { message })
+        : await post('/api/form/session', { message });
+      state.sid = out.session_id || state.sid;
+      remember(state.sid);
       $('start-card').classList.add('hidden');
       applyTurn(out);
     } catch (e) { fail(e.message); }
     busy(false);
+  }
+
+  $('start').addEventListener('click', () => {
+    const message = $('first').value.trim();
+    if (message) converse(message, '사양을 정리하는 중…');
   });
 
-  $('send').addEventListener('click', async () => {
+  $('send').addEventListener('click', () => {
     const message = $('answer').value.trim();
-    if (!message || !state.sid) return;
-    $('error').classList.add('hidden');
+    if (!message) return;
     $('answer').value = '';
-    busy(true, '답변을 반영하는 중…');
-    try {
-      applyTurn(await post(`/api/form/${state.sid}/messages`, { message }));
-    } catch (e) { fail(e.message); }
-    busy(false);
+    converse(message, '답변을 반영하는 중…');
   });
+
+  $('branch').querySelectorAll('[data-say]').forEach((b) =>
+    b.addEventListener('click', () => converse(b.dataset.say, '반영하는 중…')));
   $('answer').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $('send').click();
   });
 
   $('generate').addEventListener('click', async () => {
     $('error').classList.add('hidden');
+    if (state.mode === 'recognize') {
+      // 등록은 동기다 — LLM이 파일을 저작하지 않으니 잡·폴링이 필요 없다(인지 §5.3)
+      busy(true, '양식을 등록하는 중…');
+      try {
+        showResult(await post(`/api/form/${state.sid}/register`));
+      } catch (e) { fail(e.message); }
+      busy(false);
+      return;
+    }
     busy(true, '양식을 만드는 중…');
     try {
       const started = await post(`/api/form/${state.sid}/generate`);
@@ -424,8 +527,11 @@
 
   /** 미리보기 — 파일을 열지 않고 저작 결과를 그대로 표로 본다. */
   function showResult(out) {
-    $('result-title').textContent =
-      `${out.form_title || '양식'} · 시트 ${out.sheets.length}개`;
+    const registered = out.source === 'recognized_external';
+    $('result-heading').textContent = registered ? '등록 완료' : '생성 완료';
+    $('result-title').textContent = registered
+      ? `${out.form_title || '양식'} · 원본 ${out.original_name || ''} · 표 ${out.sheets.length}개`
+      : `${out.form_title || '양식'} · 시트 ${out.sheets.length}개`;
     $('preview').innerHTML = out.sheets.map((sheet) => {
       const byRow = {};
       let maxCol = 1;
@@ -494,8 +600,30 @@
       if (!consented) $('consent').classList.remove('hidden');
     } catch (e) { /* 동의 상태를 못 읽으면 첫 호출에서 403으로 걸린다 */ }
 
+    // 진행 중이던 문답 복원 — GET /api/form/{sid}는 있었지만 화면이 쓰지 않아서,
+    // 새로고침하면 확정된 사양을 두고도 문답을 처음부터 다시 해야 했다
+    const params = new URLSearchParams(location.search);
+    const sid = params.get('sid') || remembered();
+    if (sid && consented) {
+      try {
+        const s = await api(`/api/form/${sid}`);
+        if (s.status === 'closed') {
+          remember('');                      // 이미 끝난 문답은 되살리지 않는다
+        } else {
+          state.sid = s.session_id;
+          remember(s.session_id);
+          $('start-card').classList.add('hidden');
+          $('work').classList.remove('hidden');
+          applyTurn({ messages: s.messages, spec_json: s.spec_json, gaps: s.gaps,
+                      spec_complete: s.spec_complete, mode: s.mode,
+                      attachments: s.attachments });
+          return;                            // 복원했으면 새 프롬프트를 태우지 않는다
+        }
+      } catch (e) { remember(''); }          // 남의 것·없는 것은 404 → 조용히 새로 시작
+    }
+
     // 홈(화면 2)에서 넘어온 프롬프트를 이어받는다
-    const q = new URLSearchParams(location.search).get('q');
+    const q = params.get('q');
     if (q) {
       $('first').value = q;
       if (consented) $('start').click();     // 동의 전이면 모달을 먼저 보게 둔다
