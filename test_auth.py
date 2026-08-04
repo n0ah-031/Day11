@@ -52,6 +52,18 @@ def book_bytes() -> bytes:
     return buf.getvalue()
 
 
+def hwpx_bytes(tag: str) -> bytes:
+    """hwpx fixture는 test_hwpx.py 것을 그대로 쓴다(구조를 두 곳에서 관리하지 않는다)."""
+    import tempfile
+    from pathlib import Path
+
+    import test_hwpx as th
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / f"{tag}.hwpx"
+        th._fixture(p, tag, b"\x89PNG-" + tag.encode())
+        return p.read_bytes()
+
+
 def wait(res, timeout: float = 120.0):
     """잡 기반 엔드포인트: job_id를 받아 완료까지 폴링하고 결과만 돌려준다."""
     assert res.status_code == 200, res.text
@@ -265,6 +277,84 @@ def test_persistence(client: TestClient):
     return project_id
 
 
+def _object_of(bucket: str, path: str, tries: int = 6) -> bytes:
+    """방금 올린 Storage 객체를 읽는다.
+
+    오브젝트 스토리지는 쓰기 직후 읽기가 즉시 보장되지 않는다. 엑셀 시나리오는 업로드와
+    확인 사이에 검토·취합이 끼어 시간이 벌어지지만, 한글 병합은 업로드 직후라 간격이
+    거의 없어 한 번 간헐 실패했다. 값을 눙치지 않고 잠깐 기다렸다 다시 읽는다.
+    """
+    import store
+    last = None
+    for i in range(tries):
+        try:
+            return store.get_object(bucket, path)
+        except Exception as exc:                      # 404를 포함한 일시적 실패
+            last = exc
+            time.sleep(0.3 * (i + 1))
+    raise AssertionError(f"Storage 객체를 읽지 못했다: {bucket}/{path} — {last}")
+
+
+def test_hwpx_persistence(client: TestClient):
+    """한글 병합도 Storage·DB에 남고, 이력에서 유형으로 걸러져야 한다 (F3 + F4-2)."""
+    import store
+
+    made = client.post("/api/session", json={"kind": "hwpx"}).json()
+    sid, project_id = made["sid"], made["project_id"]
+    assert made["kind"] == "hwpx" and project_id, made
+
+    out = wait(client.post(f"/api/hwpx/session/{sid}/files", files=[
+        ("files", ("가.hwpx", hwpx_bytes("A"), "application/octet-stream")),
+        ("files", ("나.hwpx", hwpx_bytes("B"), "application/octet-stream"))]))
+    assert all(f["readable"] for f in out["files"]), out
+
+    merged = wait(client.post(f"/api/hwpx/session/{sid}/merge", json={"order": [1, 0]}))
+    assert merged["metrics"] == {"merged": 2, "sections": 2,
+                                 "size_kb": merged["metrics"]["size_kb"]}, merged
+
+    d = client.get(f"/api/history/{project_id}").json()
+    assert len(d["uploaded_files"]) == 2, d["uploaded_files"]
+    job = d["aggregation_jobs"][0]
+    assert job["status"] == "done" and job["progress"] == 100, job
+    # 합성 모드(A/B/C/D)는 엑셀 취합 개념이라 한글 병합에는 없다 → 임의 값이 아니라 NULL
+    assert job["mode"] is None, job
+    assert job["result_url"].endswith(".hwpx"), job["result_url"]
+    kinds = store._rest("GET", "/aggregation_jobs",
+                        params={"id": f"eq.{job['id']}", "select": "kind"}).json()
+    assert kinds[0]["kind"] == "hwpx", kinds
+
+    # 기록의 유형이 hwpx이고 원본도 hwpx 확장자로 Storage에 올라갔는지
+    rows = store._rest("GET", "/uploaded_files",
+                       params={"project_id": f"eq.{project_id}",
+                               "select": "kind,storage_path"}).json()
+    assert {r["kind"] for r in rows} == {"hwpx"}, rows
+    assert all(r["storage_path"].endswith(".hwpx") for r in rows), rows
+    assert _object_of(store.UPLOAD_BUCKET, rows[0]["storage_path"])[:2] == b"PK", rows[0]
+
+    # 세션이 사라진 뒤에도 이력에서 내려받을 수 있고, hwpx로 내려와야 한다
+    import server
+    server.SESSIONS.clear()
+    # 결과도 방금 올라간 객체라 첫 요청이 이를 수 있다(위 _object_of와 같은 이유).
+    # 사용자 경로는 세션의 로컬 파일을 주므로 이 지연에 걸리지 않는다.
+    for i in range(6):
+        dl = client.get(f"/api/history/{project_id}/download/{job['id']}")
+        if dl.status_code == 200:
+            break
+        time.sleep(0.3 * (i + 1))
+    assert dl.status_code == 200 and dl.content[:2] == b"PK", (dl.status_code, dl.text[:200])
+    assert dl.headers["content-type"] == server.HWPX_MIME, dl.headers
+    assert "merged.hwpx" in dl.headers.get("content-disposition", ""), dl.headers
+
+    def ids(**params):
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        return [p["id"] for p in client.get(f"/api/history?{qs}").json()["projects"]]
+
+    assert project_id in ids(type="hwpx"), "한글 유형에 잡혀야 한다"
+    assert project_id not in ids(type="excel"), "엑셀 유형에는 안 잡혀야 한다"
+    assert project_id in ids(q="한글"), "작업명으로 찾아야 한다"
+    print("  ✓ 한글 병합 영속화 + 이력 유형 필터(엑셀/한글 구분)")
+
+
 def test_admin_console(client: TestClient):
     """Admin API는 관리자만 쓸 수 있고, 변경은 감사 로그에 남아야 한다 (F4-3)."""
     import manage_users
@@ -389,7 +479,7 @@ def _delete_test_logs() -> None:
     headers = {"apikey": key, "Authorization": f"Bearer {key}",
                "Content-Type": "application/json"}
     base = os.environ["SUPABASE_URL"].rstrip("/")
-    for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료"):
+    for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료", "한글 병합 완료"):
         httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
                      params={"actor_id": "is.null", "action": f"eq.{action}"})
 
@@ -442,6 +532,7 @@ def main() -> int:
         test_isolation(sid)
         test_role_and_suspend(client)
         test_persistence(client)
+        test_hwpx_persistence(client)
         test_admin_console(client)
         test_public_key_reads_nothing()
         test_logout(client)

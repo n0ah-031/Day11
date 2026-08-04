@@ -28,6 +28,7 @@ import auth
 UPLOAD_BUCKET = "uploads"
 RESULT_BUCKET = "results"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+HWPX_MIME = "application/hwp+zip"
 TIMEOUT = 60          # 대용량 xlsx 업로드를 감당할 여유
 
 
@@ -67,22 +68,30 @@ def create_project(owner_id: str, name: str) -> str:
 
 
 # ── 업로드 파일 ───────────────────────────────────────────────────────────────
-def put_upload(project_id: str, uploader_id: str, local_path: Path, original_name: str) -> dict:
+def put_upload(project_id: str, uploader_id: str, local_path: Path, original_name: str,
+               kind: str = "excel") -> dict:
     """파일을 uploads 버킷에 올리고 uploaded_files 행을 남긴다.
 
     Storage 키에는 원본 파일명을 쓰지 않는다 — 한글·공백이 섞인 이름이 키로
     들어가면 인코딩 문제가 생기고, 원본명은 DB에 그대로 보관하면 충분하다.
+    확장자·MIME은 kind에서 정한다(excel=xlsx / hwpx=hwpx).
     """
     file_id = str(uuid.uuid4())
-    storage_path = f"{project_id}/{file_id}.xlsx"
+    ext, mime = _kind_format(kind)
+    storage_path = f"{project_id}/{file_id}.{ext}"
     data = local_path.read_bytes()
-    _put_object(UPLOAD_BUCKET, storage_path, data, XLSX_MIME)
+    _put_object(UPLOAD_BUCKET, storage_path, data, mime)
     row = _insert("uploaded_files", {
         "id": file_id, "project_id": project_id, "uploader_id": uploader_id,
         "storage_path": storage_path, "original_name": original_name,
-        "kind": "excel", "status": "uploaded", "size_bytes": len(data),
+        "kind": kind, "status": "uploaded", "size_bytes": len(data),
     })
     return row
+
+
+def _kind_format(kind: str) -> tuple[str, str]:
+    """프로젝트 유형 → (확장자, MIME)."""
+    return ("hwpx", HWPX_MIME) if kind == "hwpx" else ("xlsx", XLSX_MIME)
 
 
 def _put_object(bucket: str, path: str, data: bytes, content_type: str | None = None) -> None:
@@ -119,9 +128,9 @@ def save_review(file_id: str, grade: str, issues: list[dict]) -> None:
 
 # ── 취합 잡 ───────────────────────────────────────────────────────────────────
 def create_job(project_id: str, mode: str, included_file_ids: list[str],
-               summary_fields: list[str]) -> str:
+               summary_fields: list[str], kind: str = "excel") -> str:
     return _insert("aggregation_jobs", {
-        "project_id": project_id, "kind": "excel", "mode": mode, "status": "running",
+        "project_id": project_id, "kind": kind, "mode": mode, "status": "running",
         "included_file_ids": included_file_ids, "summary_fields_json": summary_fields,
         "progress": 0, "stats_json": {},
     })["id"]
@@ -133,9 +142,14 @@ def update_job(job_id: str, **fields) -> None:
 
 
 def put_result(project_id: str, job_id: str, local_path: Path, label: str) -> str:
-    """취합 결과·오류 리포트를 results 버킷에 올리고 경로를 돌려준다."""
-    path = f"{project_id}/{job_id}_{label}.xlsx"
-    _put_object(RESULT_BUCKET, path, local_path.read_bytes(), XLSX_MIME)
+    """취합 결과·오류 리포트를 results 버킷에 올리고 경로를 돌려준다.
+
+    확장자는 만들어진 파일 그대로 따라간다 — 엑셀 취합은 xlsx, 한글 병합은 hwpx다.
+    """
+    ext = local_path.suffix.lstrip(".").lower() or "bin"
+    mime = HWPX_MIME if ext == "hwpx" else XLSX_MIME
+    path = f"{project_id}/{job_id}_{label}.{ext}"
+    _put_object(RESULT_BUCKET, path, local_path.read_bytes(), mime)
     return path
 
 

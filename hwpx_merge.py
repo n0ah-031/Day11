@@ -215,12 +215,22 @@ def _replace_box(header: str, box: str, items: list[str]) -> str:
 
 # -------------------------------------------------------------------- 병합
 
-def merge(paths: list[Path], out: Path) -> dict:
-    """hwpx 여러 개를 파일당 별도 구역으로 이어 붙인다. 리포트를 돌려준다."""
+def merge(paths: list[Path], out: Path, progress=None) -> dict:
+    """hwpx 여러 개를 파일당 별도 구역으로 이어 붙인다. 리포트를 돌려준다.
+
+    progress(phase, done, total)를 주면 단계를 알린다. 읽기가 파일 수에 비례하는
+    유일한 구간이라 거기서만 파일별로 보고하고, 나머지는 단계 이름만 넘긴다.
+    """
     if len(paths) < 2:
         raise MergeError("병합할 파일이 2개 이상 필요합니다")
-    docs = [_read(p) for p in paths]
+    step = progress or (lambda *a: None)
+
+    docs = []
+    for i, p in enumerate(paths):
+        step(f"{p.name} 읽는 중", i, len(paths))
+        docs.append(_read(p))
     base = docs[0]
+    step("서식 정보를 합치는 중", len(paths), len(paths))
     maps = _build_maps(docs)
 
     # BinData 이름 충돌 회피 — 2번째 문서부터 접두사
@@ -264,6 +274,7 @@ def merge(paths: list[Path], out: Path) -> dict:
         header = _replace_raw(header, "fontfaces", block)
 
     # 본문 — 파일 순서대로 section0..N
+    step("본문을 이어 붙이는 중", 0, 0)
     sections = []
     for d, mp, bm in zip(docs, maps, binmaps):
         sections += [_remap(s, mp, bm) for s in d["sections"]]
@@ -276,6 +287,7 @@ def merge(paths: list[Path], out: Path) -> dict:
     hpf = _rebuild_hpf(base["hpf"], len(sections), sorted(binout))
 
     # 검증 — 통과하지 못하면 파일을 쓰지 않는다
+    step("검증 중", 0, 0)
     report = _verify(header, sections, binout, docs)
     report["파일"] = [p.name for p in paths]
     report["구역"] = {p.name: len(d["sections"]) for p, d in zip(paths, docs)}
@@ -285,6 +297,7 @@ def merge(paths: list[Path], out: Path) -> dict:
         report["결과"] = "실패"
         return report
 
+    step("결과 파일을 저장하는 중", 0, 0)
     _write(out, header, sections, hpf, binout, base["extra"])
     report["결과"] = "성공"
     report["출력"] = str(out)

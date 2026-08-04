@@ -73,6 +73,92 @@ def new_session() -> str:
     return res.json()["sid"]
 
 
+def hwpx_bytes(tag: str) -> bytes:
+    """hwpx fixture는 test_hwpx.py 것을 그대로 쓴다(구조를 두 곳에서 관리하지 않는다)."""
+    import tempfile
+    from pathlib import Path
+
+    import test_hwpx as th
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / f"{tag}.hwpx"
+        th._fixture(p, tag, b"\x89PNG-" + tag.encode())
+        return p.read_bytes()
+
+
+def hwpx_session() -> str:
+    res = client.post("/api/session", json={"kind": "hwpx"})
+    assert res.status_code == 200 and res.json()["kind"] == "hwpx", res.text
+    return res.json()["sid"]
+
+
+def test_hwpx_end_to_end():
+    """한글 병합: 업로드 → 드래그 순서(역순)로 병합 → hwpx 다운로드."""
+    import zipfile
+
+    sid = hwpx_session()
+    files = wait(client.post(f"/api/hwpx/session/{sid}/files",
+                             files=[("files", ("가.hwpx", hwpx_bytes("A"), "application/octet-stream")),
+                                    ("files", ("나.hwpx", hwpx_bytes("B"), "application/octet-stream"))
+                                    ]))["files"]
+    assert [f["fid"] for f in files] == [0, 1], files
+    assert all(f["readable"] and f["sections"] == 1 for f in files), files
+
+    # 화면에서 드래그로 뒤집은 순서를 그대로 보낸다
+    out = wait(client.post(f"/api/hwpx/session/{sid}/merge", json={"order": [1, 0]}))
+    assert out["metrics"] == {"merged": 2, "sections": 2, "size_kb": out["metrics"]["size_kb"]}
+    assert out["order"] == ["나.hwpx", "가.hwpx"], out["order"]
+    assert any("settings.xml" in n for n in out["notes"]), out["notes"]
+    assert out["untouched_refs"] == {"linkListIDRef": 2, "linkListNextIDRef": 2}, out["untouched_refs"]
+
+    res = client.get(f"/api/hwpx/session/{sid}/download")
+    assert res.status_code == 200 and res.headers["content-type"] == server.HWPX_MIME
+    z = zipfile.ZipFile(io.BytesIO(res.content))
+    assert z.read("mimetype") == b"application/hwp+zip"
+    assert 'secCnt="2"' in z.read("Contents/header.xml").decode()
+    # 지정한 순서가 구역 순서다 — 첫 구역이 두 번째로 올린 파일이어야 한다
+    assert "B" in z.read("Contents/section0.xml").decode()
+    assert "A" in z.read("Contents/section1.xml").decode()
+    print("  ✓ 한글 병합 end-to-end(업로드→지정 순서 병합→hwpx 다운로드)")
+
+
+def test_hwpx_rejected():
+    """확장자·개수 거부와, 열리지 않는 파일의 사유 표시."""
+    sid = hwpx_session()
+    res = client.post(f"/api/hwpx/session/{sid}/files",
+                      files=[("files", ("표.xlsx", book_bytes(CLEAN), "application/octet-stream"))])
+    assert res.status_code == 400 and ".hwp" in res.json()["detail"], res.text
+
+    # zip이 아닌 파일은 업로드는 되지만 '열 수 없음'으로 표시되고 병합 대상에서 빠진다
+    files = wait(client.post(f"/api/hwpx/session/{sid}/files",
+                             files=[("files", ("깨진.hwpx", b"not a zip", "application/octet-stream")),
+                                    ("files", ("가.hwpx", hwpx_bytes("A"), "application/octet-stream"))
+                                    ]))["files"]
+    assert files[0]["readable"] is False and "hwp" in files[0]["reason"], files[0]
+    assert files[1]["readable"] is True, files[1]
+
+    # 병합 가능한 파일이 1개뿐 → 400
+    res = client.post(f"/api/hwpx/session/{sid}/merge", json={"order": [0, 1]})
+    assert res.status_code == 400 and "2개 이상" in res.json()["detail"], res.text
+
+    res = client.get(f"/api/hwpx/session/{sid}/download")
+    assert res.status_code == 404, res.text
+    print("  ✓ 한글 병합 거부(.xlsx / 열 수 없는 파일 / 대상 2개 미만 / 결과 없음)")
+
+
+def test_session_sweep():
+    """F3-5 임시 파일 자동 정리 — TTL이 지난 세션 폴더는 새 세션이 생길 때 지워진다."""
+    sid = hwpx_session()
+    session = server.SESSIONS[sid]
+    tmpdir = session["dir"]
+    assert tmpdir.exists()
+
+    session["created"] -= (server.SESSION_TTL_H * 3600) + 60      # 만료시킨다
+    hwpx_session()                                                # 새 세션 → 청소 실행
+    assert sid not in server.SESSIONS, "만료 세션이 남아 있다"
+    assert not tmpdir.exists(), "임시 폴더가 지워지지 않았다"
+    print("  ✓ 만료 세션 임시 폴더 자동 정리")
+
+
 def test_end_to_end():
     """업로드 → 검토 → 정상 파일만 취합 → 결과 xlsx 다운로드."""
     sid = new_session()
@@ -240,7 +326,8 @@ def test_job_progress():
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
     for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
-               test_optional_columns, test_dept_names, test_job_progress):
+               test_optional_columns, test_dept_names, test_job_progress,
+               test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep):
         fn()
     print("\n전체 통과")
     return 0

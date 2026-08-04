@@ -11,8 +11,10 @@ aggregate.py(CLI 엔진)를 수정 없이 import해 브라우저 흐름에 얹�
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -22,13 +24,23 @@ from fastapi.staticfiles import StaticFiles
 
 import aggregate as ag
 import auth
+import hwpx_merge as hm
 import store
 
 BASE = Path(__file__).parent
 MAX_FILE_MB = 50            # 파일 1개 상한
 MAX_SESSION_FILES = 30      # 세션 누적 파일 수 상한
 MAX_SESSION_MB = 500        # 세션 누적 용량 상한
+SESSION_TTL_H = 6           # 이 시간이 지난 세션의 임시 폴더는 지운다 (F3-5)
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+HWPX_MIME = "application/hwp+zip"
+
+# 업로드 허용 형식 → (거부 메시지에 붙일 안내, 결과 MIME)
+FORMATS = {
+    "xlsx": ("엑셀에서 'Excel 통합 문서(*.xlsx)'로 저장 후 재시도해주세요.", XLSX_MIME),
+    "hwpx": ("한글에서 '한글 문서(*.hwpx)'로 저장 후 재시도해주세요. "
+             "구버전 .hwp(바이너리)는 지원하지 않습니다.", HWPX_MIME),
+}
 
 ag.load_env(BASE / ".env")
 app = FastAPI(title="엑셀 취합")
@@ -211,7 +223,6 @@ def history(q: str = "", type: str = "", user: dict = User) -> dict:
     """F4-2 이력. 본인 프로젝트만 돌려준다 (§6.2).
 
     type은 design.md 화면 9의 유형 필터(전체/엑셀/hwpx)에 대응한다.
-    hwpx(F3)는 미착수라 지금은 항상 빈 목록이 된다.
     """
     if not store.enabled() or not user["id"]:
         return {"projects": []}
@@ -238,8 +249,10 @@ def history_download(project_id: str, job_id: str, user: dict = User):
     if job is None or not job.get("result_url"):
         raise HTTPException(404, "결과 파일이 없습니다.")
     data = store.get_object(store.RESULT_BUCKET, job["result_url"])
-    return Response(content=data, media_type=XLSX_MIME,
-                    headers={"Content-Disposition": 'attachment; filename="merged.xlsx"'})
+    # 확장자는 저장된 결과 파일을 따라간다 — 엑셀 취합은 xlsx, 한글 병합은 hwpx다
+    ext = Path(job["result_url"]).suffix.lstrip(".").lower() or "xlsx"
+    return Response(content=data, media_type=FORMATS.get(ext, (None, XLSX_MIME))[1],
+                    headers={"Content-Disposition": f'attachment; filename="merged.{ext}"'})
 
 
 @app.get("/api/job/{jid}")
@@ -267,33 +280,52 @@ def _file_view(fid: int, uf, siblings: list[str] | None = None) -> dict:
     }
 
 
+def _sweep_sessions() -> None:
+    """오래된 세션의 임시 폴더를 지운다 (F3-5 임시 파일 자동 정리).
+
+    세션 생성 때마다 훑는다 — 주기 작업을 따로 돌리지 않아도 새 작업이 시작될 때
+    청소되고, 아무도 안 쓰면 지울 것도 없다. 엑셀·한글 세션 모두에 적용된다.
+    """
+    cutoff = time.time() - SESSION_TTL_H * 3600
+    for sid, session in list(SESSIONS.items()):
+        if session.get("created", 0) < cutoff:
+            shutil.rmtree(session["dir"], ignore_errors=True)
+            SESSIONS.pop(sid, None)
+
+
 @app.post("/api/session")
-def create_session(user: dict = User) -> dict:
-    """취합 작업 1건 = 프로젝트 1개. 사용자가 고르는 UI는 아직 없어 자동 생성한다."""
+def create_session(body: dict = Body(default={}), user: dict = User) -> dict:
+    """작업 1건 = 프로젝트 1개. 사용자가 고르는 UI는 아직 없어 자동 생성한다.
+
+    kind는 엑셀 취합(excel, 기본)과 한글 병합(hwpx)을 가른다.
+    """
+    _sweep_sessions()
+    kind = "hwpx" if (body or {}).get("kind") == "hwpx" else "excel"
     sid = uuid.uuid4().hex
     session = SESSIONS[sid] = {"dir": Path(tempfile.mkdtemp(prefix="agg-")), "files": [],
                                "bytes": 0, "owner": user["id"], "project_id": None,
-                               "file_ids": {}, "dept_names": {}}
+                               "file_ids": {}, "dept_names": {}, "kind": kind,
+                               "created": time.time()}
     if store.enabled() and user["id"]:
         # 이름에 시각을 넣지 않는다 — 서버 시간대로 굳어버려 DB의 created_at(UTC)을
         # 보는 사람 시간대로 변환한 값과 어긋난다. 시각은 created_at만 쓴다.
-        session["project_id"] = store.create_project(user["id"], "엑셀 취합")
-    return {"sid": sid, "project_id": session["project_id"]}
+        session["project_id"] = store.create_project(
+            user["id"], "한글 병합" if kind == "hwpx" else "엑셀 취합")
+    return {"sid": sid, "project_id": session["project_id"], "kind": kind}
 
 
-@app.post("/api/session/{sid}/files")
-async def upload_files(sid: str, files: list[UploadFile] = File(...), user: dict = User) -> dict:
-    """저장까지만 동기로 하고, 느린 구조 인식은 잡으로 넘긴다.
+async def _save_uploads(session: dict, files: list[UploadFile], ext: str) -> list[Path]:
+    """확장자·용량·개수 상한(§6)을 확인하고 세션 폴더에 저장한다.
 
-    거부 사유(확장자·용량·개수)는 즉시 400으로 돌려줘야 하므로 여기서 검사한다.
+    거부 사유는 즉시 400으로 돌려줘야 하므로 잡으로 넘기지 않고 여기서 검사한다.
+    엑셀 취합(F2)과 한글 병합(F3-6)이 같은 상한을 쓴다.
     """
-    session = _session(sid, user)
+    hint = FORMATS[ext][0]
     pending: list[Path] = []
     for up in files:
         name = Path(up.filename or "").name
-        if not name.lower().endswith(".xlsx"):
-            raise HTTPException(400, f"'{name}'은(는) .xlsx 파일이 아닙니다. "
-                                     "엑셀에서 'Excel 통합 문서(*.xlsx)'로 저장 후 재시도해주세요.")
+        if not name.lower().endswith("." + ext):
+            raise HTTPException(400, f"'{name}'은(는) .{ext} 파일이 아닙니다. {hint}")
         data = await up.read()
         if len(data) > MAX_FILE_MB * 1024 * 1024:
             raise HTTPException(400, f"'{name}'의 용량이 {MAX_FILE_MB}MB를 초과합니다.")
@@ -302,9 +334,20 @@ async def upload_files(sid: str, files: list[UploadFile] = File(...), user: dict
         if session["bytes"] + len(data) > MAX_SESSION_MB * 1024 * 1024:
             raise HTTPException(400, f"업로드 총 용량이 {MAX_SESSION_MB}MB를 초과합니다.")
         path = session["dir"] / name
+        if path.exists():
+            # 같은 이름이 또 오면 덮어쓰지 않는다 — 병합 순서에 둘 다 들어갈 수 있다
+            path = session["dir"] / f"{path.stem}_{len(session['files']) + len(pending) + 1}{path.suffix}"
         path.write_bytes(data)
         session["bytes"] += len(data)
         pending.append(path)
+    return pending
+
+
+@app.post("/api/session/{sid}/files")
+async def upload_files(sid: str, files: list[UploadFile] = File(...), user: dict = User) -> dict:
+    """저장까지만 동기로 하고, 느린 구조 인식은 잡으로 넘긴다."""
+    session = _session(sid, user)
+    pending = await _save_uploads(session, files, "xlsx")
 
     def work(report):
         for i, path in enumerate(pending):
@@ -496,6 +539,105 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
         return payload
 
     return _start_job(work, user["id"])
+
+
+# ── F3 한글(hwpx) 병합 ────────────────────────────────────────────────────────
+# 엑셀 취합과 세션·잡·상한·인증을 공유하고, 다른 것은 검사할 확장자와 엔진뿐이다.
+
+@app.post("/api/hwpx/session/{sid}/files")
+async def hwpx_upload(sid: str, files: list[UploadFile] = File(...), user: dict = User) -> dict:
+    """F3-1 다중 hwpx 업로드. 병합 가능한 파일인지 여기서 판정해 목록에 표시한다."""
+    session = _session(sid, user)
+    pending = await _save_uploads(session, files, "hwpx")
+
+    def work(report):
+        for i, path in enumerate(pending):
+            report(f"{path.name} 확인 중", i, len(pending))
+            entry = {"name": path.name, "path": path, "size": path.stat().st_size,
+                     "sections": 0, "readable": True, "reason": None}
+            try:
+                # 열어서 hwpx인지·본문이 있는지 확인한다. 여기서 걸러야 병합 시작 후
+                # 실패하지 않는다. 구역 수는 병합 결과를 미리 알려주는 재료다
+                entry["sections"] = len(hm._read(path)["sections"])
+            except hm.MergeError as exc:
+                entry.update(readable=False, reason=str(exc).split(": ", 1)[-1])
+            session["files"].append(entry)
+            if session["project_id"] and entry["readable"]:
+                row = store.put_upload(session["project_id"], session["owner"], path,
+                                       path.name, kind="hwpx")
+                session["file_ids"][len(session["files"]) - 1] = row["id"]
+        report("확인 완료", len(pending), len(pending))
+        return {"files": [{"fid": i, **{k: v for k, v in f.items() if k != "path"}}
+                          for i, f in enumerate(session["files"])]}
+
+    return _start_job(work, user["id"])
+
+
+@app.post("/api/hwpx/session/{sid}/merge")
+def hwpx_merge_start(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
+    """F3-2·3·4 지정한 순서로 병합. 순서는 화면에서 드래그로 정한 fid 목록이다."""
+    session = _session(sid, user)
+    files = session["files"]
+    order = [i for i in (body or {}).get("order") or []
+             if isinstance(i, int) and 0 <= i < len(files) and files[i]["readable"]]
+    order = list(dict.fromkeys(order))          # 같은 파일을 두 번 넣지 않는다
+    if len(order) < 2:
+        raise HTTPException(400, "병합할 파일을 2개 이상 선택해주세요.")
+
+    job_id = None
+    if session["project_id"]:
+        # 합성 모드(A/B/C/D)는 엑셀 취합 개념이라 한글 병합에는 없다 → NULL로 둔다
+        job_id = store.create_job(session["project_id"], None,
+                                  [session["file_ids"][i] for i in order
+                                   if i in session["file_ids"]], [], kind="hwpx")
+        session["job_id"] = job_id
+
+    def work(report):
+        out = session["dir"] / "merged.hwpx"
+        try:
+            rep = hm.merge([files[i]["path"] for i in order], out, progress=report)
+        except hm.MergeError as exc:
+            if job_id:
+                store.update_job(job_id, status="failed", error_message=str(exc))
+            raise HTTPException(400, str(exc))
+        if rep["결과"] != "성공":
+            # 검증 미통과 — 엔진이 파일을 쓰지 않았다. 깨진 산출물을 내보내지 않는다
+            reason = "; ".join(rep["dangling"][:5]) or "; ".join(rep["itemCnt불일치"][:5])
+            if job_id:
+                store.update_job(job_id, status="failed", error_message=reason)
+            raise HTTPException(400, f"병합 결과 검증에 실패해 파일을 만들지 않았습니다: {reason}")
+
+        session["result"] = out
+        report("병합 완료", 1, 1)
+        payload = {
+            "metrics": {
+                "merged": len(order),
+                "sections": sum(rep["구역"].values()),
+                "size_kb": round(out.stat().st_size / 1024),
+            },
+            "order": [files[i]["name"] for i in order],
+            "sections_by_file": rep["구역"],
+            "notes": rep["한계"],
+            # header에 정의가 없어 그대로 둔 참조 — 몇 건인지 밝힌다
+            "untouched_refs": rep["미대응"],
+        }
+        if job_id:
+            result_url = store.put_result(session["project_id"], job_id, out, "merged")
+            store.update_job(job_id, status="done", progress=100, result_url=result_url,
+                             stats_json=payload["metrics"])
+            store.log_action(session["owner"], "한글 병합 완료", f"{len(order)}건")
+        return payload
+
+    return _start_job(work, user["id"])
+
+
+@app.get("/api/hwpx/session/{sid}/download")
+def hwpx_download(sid: str, user: dict = User):
+    session = _session(sid, user)
+    path = session.get("result")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "아직 생성되지 않은 파일입니다.")
+    return FileResponse(path, filename="merged.hwpx", media_type=HWPX_MIME)
 
 
 @app.get("/api/session/{sid}/download/{kind}")

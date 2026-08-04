@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>취합 (Chwi-hap) - 한글 병합</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+
+<!-- 저장된 테마를 페인트 전에 적용 (전환 시 흰 화면 깜빡임 방지) -->
+<script>
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem('theme'); } catch (e) {}
+    var dark = saved ? saved === 'dark'
+                     : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.classList.toggle('dark', dark);
+  })();
+</script>
+
+<script id="tailwind-config">
+  // 색상은 채널값 CSS 변수를 참조한다. rgb(var(--x) / <alpha-value>) 형태여야
+  // bg-primary/20 같은 투명도 유틸리티가 라이트·다크 양쪽에서 동작한다.
+  const token = (name) => `rgb(var(${name}) / <alpha-value>)`;
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "primary": token("--primary"),
+          "primary-container": token("--primary-container"),
+          "on-primary": token("--on-primary"),
+          "secondary": token("--secondary"),
+          "secondary-container": token("--secondary-container"),
+          "tertiary": token("--tertiary"),
+          "tertiary-container": token("--tertiary-container"),
+          "background": token("--background"),
+          "surface": token("--surface"),
+          "surface-variant": token("--surface-variant"),
+          "surface-container": token("--surface-container"),
+          "surface-container-low": token("--surface-container-low"),
+          "surface-container-high": token("--surface-container-high"),
+          "surface-container-highest": token("--surface-container-highest"),
+          "on-surface": token("--on-surface"),
+          "on-surface-variant": token("--on-surface-variant"),
+          "outline": token("--outline"),
+          "outline-variant": token("--outline-variant"),
+          "error": token("--error")
+        },
+        borderRadius: {
+          "DEFAULT": "var(--radius)",
+          "lg": "var(--radius-lg)",
+          "xl": "var(--radius-xl)",
+          "full": "9999px"
+        },
+        spacing: {
+          "lg": "40px", "gutter": "24px", "base": "4px", "md": "24px",
+          "container-max": "1200px", "xl": "64px", "sm": "16px", "xs": "8px"
+        },
+        fontFamily: {
+          "headline-xl": ["Noto Sans"], "headline-lg": ["Noto Sans"], "headline-md": ["Noto Sans"],
+          "body-lg": ["Noto Sans"], "body-md": ["Noto Sans"], "body-sm": ["Noto Sans"],
+          "label-md": ["Noto Sans"], "label-sm": ["Noto Sans"]
+        },
+        fontSize: {
+          "headline-xl": ["36px", {"lineHeight": "44px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+          "headline-lg": ["28px", {"lineHeight": "36px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+          "headline-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+          "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+          "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+          "body-sm": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+          "label-md": ["14px", {"lineHeight": "16px", "fontWeight": "500"}],
+          "label-sm": ["12px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600"}]
+        },
+        boxShadow: {
+          "soft": "var(--shadow-soft)",
+          "soft-hover": "var(--shadow-soft-hover)"
+        }
+      }
+    }
+  };
+</script>
+
+<style>
+  /* 라이트 — stitch_ (1): Soft Lavender / 둥근 코너 / 부드러운 그림자 */
+  :root {
+    --primary: 138 132 255;
+    --primary-container: 230 228 255;
+    --on-primary: 255 255 255;
+    --secondary: 127 199 189;
+    --secondary-container: 214 242 238;
+    --tertiary: 255 179 138;
+    --tertiary-container: 255 234 214;
+    --background: 253 251 255;
+    --surface: 255 255 255;
+    --surface-variant: 245 243 255;
+    --surface-container: 245 243 255;
+    --surface-container-low: 250 249 255;
+    --surface-container-high: 240 238 255;
+    --surface-container-highest: 235 232 255;
+    --on-surface: 45 45 58;
+    --on-surface-variant: 91 91 110;
+    --outline: 209 209 224;
+    --outline-variant: 235 235 245;
+    --error: 255 138 138;
+
+    --radius: 1rem;
+    --radius-lg: 1.25rem;
+    --radius-xl: 2rem;
+    --shadow-soft: 0 8px 30px rgb(138 132 255 / 0.08);
+    --shadow-soft-hover: 0 12px 40px rgb(138 132 255 / 0.12);
+    --glass-bg: 255 255 255 / 0.7;
+    --glass-border: 255 255 255 / 0.8;
+    --blob-opacity: 0.05;
+  }
+
+  /* 다크 — stitch_ (2): Vibrant Indigo / 각진 코너 / 글로우 */
+  .dark {
+    --primary: 79 70 229;
+    --primary-container: 55 48 163;
+    --on-primary: 255 255 255;
+    --secondary: 129 140 248;
+    --secondary-container: 49 46 129;
+    --tertiary: 192 132 252;
+    --tertiary-container: 88 28 135;
+    --background: 2 6 23;
+    --surface: 15 23 42;
+    --surface-variant: 30 41 59;
+    --surface-container: 30 41 59;
+    --surface-container-low: 15 23 42;
+    --surface-container-high: 51 65 85;
+    --surface-container-highest: 71 85 105;
+    --on-surface: 241 245 249;
+    --on-surface-variant: 148 163 184;
+    --outline: 51 65 85;
+    --outline-variant: 30 41 59;
+    --error: 239 68 68;
+
+    --radius: 0.375rem;
+    --radius-lg: 0.75rem;
+    --radius-xl: 1rem;
+    --shadow-soft: 0 0 15px rgb(79 70 229 / 0.1);
+    --shadow-soft-hover: 0 0 20px rgb(79 70 229 / 0.2);
+    --glass-bg: 15 23 42 / 0.6;
+    --glass-border: 51 65 85 / 0.5;
+    --blob-opacity: 0.12;
+  }
+
+  body {
+    font-family: 'Noto Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+  .glass-card {
+    background: rgb(var(--glass-bg));
+    backdrop-filter: blur(12px);
+    border: 1px solid rgb(var(--glass-border));
+  }
+  /* 다크 모드에서만 입력창에 글로우를 얹는다 (라이트는 soft shadow 유지) */
+  .dark .glow-border { box-shadow: 0 0 15px rgb(var(--primary) / 0.1); }
+  .dark .glow-border:focus-within {
+    border-color: rgb(var(--primary) / 0.8);
+    box-shadow: 0 0 20px rgb(var(--primary) / 0.2);
+  }
+  .blob { opacity: var(--blob-opacity); }
+</style>
+</head>
+
+
+<body class="bg-background text-on-surface">
+<header class="fixed top-0 w-full z-50 bg-surface/80 backdrop-blur-md border-b border-outline-variant">
+<div class="flex justify-between items-center h-16 px-gutter max-w-container-max mx-auto">
+<a class="text-headline-lg font-headline-lg font-bold text-primary tracking-tight" href="index.html">취합</a>
+<div class="flex items-center gap-4">
+<nav class="hidden md:flex items-center gap-8">
+<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="aggregate.html">엑셀 취합</a>
+<a class="text-primary text-label-md font-label-md font-semibold" href="hwpx.html" aria-current="page">한글 병합</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="history.html">이력</a>
+<a id="nav-admin" href="admin.html" class="hidden px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-label-sm font-label-sm text-primary hover:bg-primary/20 transition-colors">관리자 콘솔</a>
+<span id="nav-user" class="hidden text-body-sm font-body-sm text-on-surface-variant"></span>
+<button id="nav-logout" class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
+</nav>
+<button id="theme-toggle" type="button" aria-label="라이트/다크 모드 전환"
+        class="flex items-center justify-center w-10 h-10 rounded-full border border-outline-variant text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined" id="theme-icon">dark_mode</span>
+</button>
+</div>
+</div>
+</header>
+
+<main class="pt-24 pb-xl px-gutter max-w-container-max mx-auto">
+<h1 class="text-headline-xl font-headline-xl font-bold">한글(hwpx) 병합</h1>
+<p class="mt-2 text-body-md font-body-md text-on-surface-variant">
+여러 hwpx를 하나로 잇습니다. <strong class="text-on-surface">각 문서는 자기 구역으로 들어가</strong> 용지·여백·머리말 설정을 그대로 유지하고, 파일 경계에서 새 쪽이 시작됩니다.
+</p>
+
+<div id="error" class="hidden mt-md rounded-xl border border-error/40 bg-error/10 px-5 py-4 text-body-sm font-body-sm text-on-surface"></div>
+
+<!-- 1. 업로드 (F3-1·F3-6) -->
+<section class="mt-md rounded-xl glass-card shadow-soft p-6">
+<div class="flex items-center justify-between gap-4 flex-wrap">
+<h2 class="text-headline-md font-headline-md">파일 업로드</h2>
+<span id="count" class="text-label-md font-label-md text-on-surface-variant">0개</span>
+</div>
+<label id="drop" for="picker"
+       class="mt-4 flex flex-col items-center justify-center gap-2 py-10 px-6 rounded-xl border-2 border-dashed border-outline cursor-pointer text-center transition-colors hover:border-primary hover:bg-primary/5">
+<span class="material-symbols-outlined text-4xl text-on-surface-variant">upload_file</span>
+<span class="text-body-md font-body-md">클릭하거나 이 영역에 hwpx 파일을 끌어다 놓으세요</span>
+<span class="text-body-sm font-body-sm text-on-surface-variant" id="limits"></span>
+</label>
+<input id="picker" type="file" accept=".hwpx" multiple class="hidden">
+</section>
+
+<!-- 2. 순서 지정 (F3-2) -->
+<section id="list-card" class="hidden mt-md rounded-xl glass-card shadow-soft p-6">
+<div class="flex items-center justify-between gap-4 flex-wrap">
+<h2 class="text-headline-md font-headline-md">병합 순서</h2>
+<p class="text-body-sm font-body-sm text-on-surface-variant">행을 끌어다 놓아 순서를 바꿉니다. 체크를 해제하면 병합에서 빠집니다.</p>
+</div>
+<ul id="list" class="mt-4 flex flex-col gap-2"></ul>
+<div class="mt-5 flex items-center gap-4 flex-wrap">
+<button id="start" type="button"
+        class="px-6 py-3 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">병합 시작</button>
+<span id="hint" class="text-body-sm font-body-sm text-on-surface-variant"></span>
+</div>
+</section>
+
+<!-- 3. 진행률 (F3-4) -->
+<section id="progress-card" class="hidden mt-md rounded-xl glass-card shadow-soft p-6">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined animate-spin text-primary">progress_activity</span>
+<span id="phase" class="text-body-md font-body-md">준비 중</span>
+</div>
+<div class="mt-4 h-2 w-full rounded-full bg-surface-variant overflow-hidden">
+<div id="bar" class="h-full bg-primary transition-all" style="width:0%"></div>
+</div>
+</section>
+
+<!-- 4. 결과 -->
+<section id="result-card" class="hidden mt-md rounded-xl glass-card shadow-soft p-6">
+<h2 class="text-headline-md font-headline-md">병합 완료</h2>
+<div id="metrics" class="mt-4 grid gap-3 sm:grid-cols-3"></div>
+<div id="order-view" class="mt-5"></div>
+<div id="notes" class="mt-5"></div>
+<a id="dl" href="#" download
+   class="inline-flex items-center gap-2 mt-6 px-6 py-3 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 transition-all">
+<span class="material-symbols-outlined">download</span>결과 파일 내려받기
+</a>
+</section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  // files: 서버가 준 목록. order: 화면에서 정한 순서(fid 배열). off: 제외한 fid
+  let state = { sid: null, files: [], order: [], off: new Set() };
+
+  function paintTheme() {
+    $('theme-icon').textContent =
+      document.documentElement.classList.contains('dark') ? 'light_mode' : 'dark_mode';
+  }
+  $('theme-toggle').addEventListener('click', () => {
+    const dark = document.documentElement.classList.toggle('dark');
+    try { localStorage.setItem('theme', dark ? 'dark' : 'light'); } catch (e) {}
+    paintTheme();
+  });
+  paintTheme();
+
+  function fail(msg) {
+    $('error').textContent = msg;
+    $('error').classList.remove('hidden');
+  }
+
+  async function api(path, opts) {
+    const res = await fetch(path, opts);
+    if (res.status === 401) { location.href = '/login.html'; throw new Error('로그인이 필요합니다.'); }
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && body.detail) || `요청에 실패했습니다. (HTTP ${res.status})`);
+    return body;
+  }
+
+  /** 잡을 폴링해 단계·진행률을 그리고 결과를 돌려준다 (F3-4). */
+  async function runJob(res) {
+    $('progress-card').classList.remove('hidden');
+    const jid = res.job_id;
+    for (;;) {
+      const job = await api(`/api/job/${jid}`);
+      $('phase').textContent = job.phase || '진행 중';
+      // total이 0인 단계(진행률을 셀 수 없는 구간)는 막대를 건드리지 않는다
+      if (job.total > 0) $('bar').style.width = Math.round(job.done / job.total * 100) + '%';
+      if (job.status === 'done') {
+        $('bar').style.width = '100%';
+        $('progress-card').classList.add('hidden');
+        return job.result;
+      }
+      if (job.status === 'error') {
+        $('progress-card').classList.add('hidden');
+        throw new Error(job.error || '작업이 실패했습니다.');
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  async function ensureSession() {
+    if (state.sid) return state.sid;
+    const s = await api('/api/session', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'hwpx' })
+    });
+    state.sid = s.sid;
+    return state.sid;
+  }
+
+  async function send(fileList) {
+    if (!fileList.length) return;
+    $('error').classList.add('hidden');
+    try {
+      const sid = await ensureSession();
+      const fd = new FormData();
+      for (const f of fileList) fd.append('files', f, f.name);
+      const out = await runJob(await api(`/api/hwpx/session/${sid}/files`, { method: 'POST', body: fd }));
+      state.files = out.files;
+      // 새로 올라온 파일은 뒤에 붙인다. 이미 정한 순서는 흔들지 않는다
+      for (const f of state.files) {
+        if (!state.order.includes(f.fid)) state.order.push(f.fid);
+        if (!f.readable) state.off.add(f.fid);
+      }
+      render();
+    } catch (e) { fail(e.message); }
+  }
+
+  $('picker').addEventListener('change', (e) => { send([...e.target.files]); e.target.value = ''; });
+
+  // 드래그 앤 드롭 업로드
+  ['dragenter', 'dragover'].forEach((t) => $('drop').addEventListener(t, (e) => {
+    e.preventDefault();
+    $('drop').classList.add('border-primary', 'bg-primary/5');
+  }));
+  ['dragleave', 'drop'].forEach((t) => $('drop').addEventListener(t, (e) => {
+    e.preventDefault();
+    $('drop').classList.remove('border-primary', 'bg-primary/5');
+  }));
+  $('drop').addEventListener('drop', (e) => send([...(e.dataTransfer?.files || [])]));
+
+  const kb = (n) => n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + 'MB'
+                                     : Math.max(1, Math.round(n / 1024)) + 'KB';
+
+  function render() {
+    $('count').textContent = `${state.files.length}개`;
+    $('list-card').classList.toggle('hidden', state.files.length === 0);
+
+    const byId = Object.fromEntries(state.files.map((f) => [f.fid, f]));
+    let seq = 0;
+    $('list').innerHTML = state.order.map((fid) => {
+      const f = byId[fid];
+      if (!f) return '';
+      const on = !state.off.has(fid);
+      if (on) seq += 1;
+      return `<li draggable="${f.readable}" data-fid="${fid}"
+        class="flex items-center gap-3 px-4 py-3 rounded-xl border border-outline-variant bg-surface
+               ${f.readable ? 'cursor-grab' : 'opacity-60'} ${on ? '' : 'bg-surface-variant/40'}">
+        <span class="material-symbols-outlined text-on-surface-variant ${f.readable ? '' : 'invisible'}">drag_indicator</span>
+        <input type="checkbox" data-check="${fid}" ${on ? 'checked' : ''} ${f.readable ? '' : 'disabled'}
+               aria-label="병합에 포함" class="rounded border-outline text-primary focus:ring-primary">
+        <span class="w-7 shrink-0 text-label-md font-label-md ${on ? 'text-primary font-bold' : 'text-on-surface-variant'}">${on ? seq : '–'}</span>
+        <span class="flex-1 min-w-0 truncate text-body-md font-body-md">${esc(f.name)}</span>
+        ${f.readable
+          ? `<span class="shrink-0 text-body-sm font-body-sm text-on-surface-variant">구역 ${f.sections} · ${kb(f.size)}</span>`
+          : `<span class="shrink-0 text-body-sm font-body-sm text-error">열 수 없음 — ${esc(f.reason || '')}</span>`}
+      </li>`;
+    }).join('');
+
+    $('list').querySelectorAll('[data-check]').forEach((c) => {
+      c.addEventListener('change', () => {
+        const fid = Number(c.dataset.check);
+        c.checked ? state.off.delete(fid) : state.off.add(fid);
+        render();
+      });
+    });
+    wireDrag();
+
+    const n = state.order.filter((fid) => !state.off.has(fid) && byId[fid]?.readable).length;
+    $('start').disabled = n < 2;
+    $('hint').textContent = n < 2 ? '병합에는 파일이 2개 이상 필요합니다.' : `${n}개를 위 순서로 병합합니다.`;
+  }
+
+  /** 행 재정렬 — 브라우저 기본 드래그 앤 드롭만 쓴다(라이브러리 없음). */
+  function wireDrag() {
+    let from = null;
+    $('list').querySelectorAll('li[draggable="true"]').forEach((li) => {
+      li.addEventListener('dragstart', (e) => {
+        from = Number(li.dataset.fid);
+        li.classList.add('opacity-40');
+        // setData·effectAllowed가 없으면 브라우저가 드래그를 무효로 보고 drop을 안 준다
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(from));
+        }
+      });
+      li.addEventListener('dragend', () => li.classList.remove('opacity-40'));
+      li.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        li.classList.add('ring-2', 'ring-primary');
+      });
+      li.addEventListener('dragleave', () => li.classList.remove('ring-2', 'ring-primary'));
+      li.addEventListener('drop', (e) => {
+        e.preventDefault();
+        li.classList.remove('ring-2', 'ring-primary');
+        const to = Number(li.dataset.fid);
+        if (from === null || from === to) return;
+        // 아래로 끌면 놓은 행 뒤, 위로 끌면 앞에 넣는다. 항상 앞에 넣으면 아래로 끌 때
+        // 원래 자리와 같아져서 아무 일도 일어나지 않는다.
+        const down = state.order.indexOf(from) < state.order.indexOf(to);
+        const next = state.order.filter((x) => x !== from);
+        next.splice(next.indexOf(to) + (down ? 1 : 0), 0, from);
+        state.order = next;
+        from = null;
+        render();
+      });
+    });
+  }
+
+  $('start').addEventListener('click', async () => {
+    $('error').classList.add('hidden');
+    $('result-card').classList.add('hidden');
+    $('start').disabled = true;
+    try {
+      const order = state.order.filter((fid) => !state.off.has(fid));
+      const out = await runJob(await api(`/api/hwpx/session/${state.sid}/merge`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order })
+      }));
+      showResult(out);
+    } catch (e) { fail(e.message); }
+    render();
+  });
+
+  function showResult(out) {
+    const m = out.metrics;
+    const card = (label, value) => `<div class="rounded-xl bg-surface-variant/60 px-5 py-4">
+      <p class="text-label-sm font-label-sm text-on-surface-variant">${label}</p>
+      <p class="mt-1 text-headline-md font-headline-md">${value}</p></div>`;
+    $('metrics').innerHTML = card('병합한 파일', `${m.merged}개`)
+                           + card('구역', `${m.sections}개`)
+                           + card('결과 크기', `${m.size_kb.toLocaleString()}KB`);
+
+    $('order-view').innerHTML = `<p class="text-label-sm font-label-sm text-on-surface-variant">병합 순서</p>
+      <ol class="mt-2 flex flex-col gap-1">${out.order.map((n, i) =>
+        `<li class="text-body-sm font-body-sm"><span class="text-primary font-semibold">${i + 1}.</span> ${esc(n)}
+         <span class="text-on-surface-variant">(구역 ${out.sections_by_file[n] ?? 1})</span></li>`).join('')}</ol>`;
+
+    const untouched = Object.entries(out.untouched_refs || {});
+    $('notes').innerHTML = `
+      ${out.notes?.length ? `<div class="rounded-xl border border-tertiary/40 bg-tertiary/10 px-5 py-4">
+        <p class="text-label-md font-label-md font-semibold">알아두세요</p>
+        <ul class="mt-2 flex flex-col gap-1 list-disc pl-5">${out.notes.map((n) =>
+          `<li class="text-body-sm font-body-sm">${esc(n)}</li>`).join('')}</ul></div>` : ''}
+      ${untouched.length ? `<p class="mt-3 text-body-sm font-body-sm text-on-surface-variant">
+        원본 문서에 정의가 없어 그대로 둔 참조:
+        ${untouched.map(([k, v]) => `${esc(k)} ${v}건`).join(', ')}</p>` : ''}`;
+
+    $('dl').href = `/api/hwpx/session/${state.sid}/download`;
+    $('result-card').classList.remove('hidden');
+  }
+
+  $('nav-logout').addEventListener('click', async () => {
+    try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+    location.href = '/login.html';
+  });
+
+  (async function boot() {
+    $('limits').textContent = '파일당 50MB · 최대 30개 · 합계 500MB';
+    try {
+      const me = await api('/api/auth/me');
+      if (me.profile?.employee_no) {
+        $('nav-user').textContent = me.profile.employee_no;
+        $('nav-user').classList.remove('hidden');
+      }
+      if (me.profile?.role === 'admin') $('nav-admin').classList.remove('hidden');
+      if (!me.auth_enabled) $('nav-logout').classList.add('hidden');
+    } catch (e) { /* 인증이 꺼져 있으면 무시 */ }
+    render();
+  })();
+</script>
+</body>
+</html>
