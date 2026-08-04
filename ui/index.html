@@ -178,7 +178,8 @@
 <nav class="hidden md:flex items-center gap-8">
 <a class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md" href="history.html">이력</a>
 <a id="nav-admin" href="admin.html" class="hidden px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-label-sm font-label-sm text-primary hover:bg-primary/20 transition-colors">관리자 콘솔</a>
-<button class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
+<span id="nav-user" class="hidden text-body-sm font-body-sm text-on-surface-variant"></span>
+<button id="nav-logout" class="text-on-surface-variant hover:text-primary transition-colors text-label-md font-label-md">로그아웃</button>
 </nav>
 <!-- 라이트/다크 전환 토글 (모바일에서도 항상 노출) -->
 <button id="theme-toggle" type="button" aria-label="라이트/다크 모드 전환" aria-pressed="false"
@@ -209,7 +210,15 @@
 </a>
 <a class="flex items-center gap-3 px-5 py-4 text-on-surface-variant hover:bg-surface-container hover:text-on-surface rounded-xl transition-all" href="aggregate.html">
 <span class="material-symbols-outlined">layers</span>
-<span class="text-label-md font-label-md font-semibold">취합</span>
+<span class="text-label-md font-label-md font-semibold">엑셀 취합</span>
+</a>
+<a class="flex items-center gap-3 px-5 py-4 text-on-surface-variant hover:bg-surface-container hover:text-on-surface rounded-xl transition-all" href="hwpx.html">
+<span class="material-symbols-outlined">merge</span>
+<span class="text-label-md font-label-md font-semibold">한글 병합</span>
+</a>
+<a class="flex items-center gap-3 px-5 py-4 text-on-surface-variant hover:bg-surface-container hover:text-on-surface rounded-xl transition-all" href="history.html">
+<span class="material-symbols-outlined">history</span>
+<span class="text-label-md font-label-md font-semibold">작업 이력</span>
 </a>
 </nav>
 </aside>
@@ -220,7 +229,7 @@
 <!-- Hero Area -->
 <div class="text-center mb-lg">
 <h1 class="text-headline-xl font-headline-xl text-on-surface mb-sm leading-tight">안녕하세요,<br>오늘은 어떤 양식이 필요하신가요?</h1>
-<p class="text-body-lg font-body-lg text-on-surface-variant max-w-[600px] mx-auto">AI가 비즈니스에 최적화된 스마트한 문서 양식을 즉시 설계해 드립니다.</p>
+<p class="text-body-lg font-body-lg text-on-surface-variant max-w-[600px] mx-auto">문답으로 사양을 확정해 배포용 엑셀 양식을 만들고, 회신받은 파일을 검토해 하나로 취합합니다. <strong class="text-on-surface">이미 쓰는 양식은 그대로 등록</strong>해 쓸 수도 있습니다.</p>
 </div>
 <!-- Main Action Area -->
 <div class="w-full relative mb-md">
@@ -250,33 +259,33 @@
 </div>
 <!-- Features Section -->
 <div class="grid grid-cols-1 md:grid-cols-3 gap-md w-full">
-<div class="p-8 rounded-xl glass-card shadow-soft hover:border-primary/30 flex flex-col gap-4 text-center items-center transition-colors">
+<a href="create.html" class="p-8 rounded-xl glass-card shadow-soft hover:border-primary/30 flex flex-col gap-4 text-center items-center transition-colors">
 <div class="w-14 h-14 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center text-primary">
 <span class="material-symbols-outlined text-3xl">auto_awesome</span>
 </div>
 <div>
-<h3 class="text-headline-md font-headline-md text-on-surface mb-2">AI 기반 자동화</h3>
-<p class="text-body-sm font-body-sm text-on-surface-variant">사용자의 설명만으로 가장 적합한 필드와 구조를 제안합니다.</p>
+<h3 class="text-headline-md font-headline-md text-on-surface mb-2">양식 생성·등록</h3>
+<p class="text-body-sm font-body-sm text-on-surface-variant">설명만 하면 문답으로 사양을 확정해 배포용 양식을 만듭니다. 이미 쓰는 양식이 있으면 그대로 등록해 씁니다.</p>
 </div>
-</div>
-<div class="p-8 rounded-xl glass-card shadow-soft hover:border-secondary/30 flex flex-col gap-4 text-center items-center transition-colors">
+</a>
+<a href="aggregate.html" class="p-8 rounded-xl glass-card shadow-soft hover:border-secondary/30 flex flex-col gap-4 text-center items-center transition-colors">
 <div class="w-14 h-14 rounded-xl bg-secondary/20 border border-secondary/30 flex items-center justify-center text-secondary">
-<span class="material-symbols-outlined text-3xl">sync_alt</span>
+<span class="material-symbols-outlined text-3xl">layers</span>
 </div>
 <div>
-<h3 class="text-headline-md font-headline-md text-on-surface mb-2">실시간 취합</h3>
-<p class="text-body-sm font-body-sm text-on-surface-variant">공유된 링크를 통해 데이터가 실시간으로 안전하게 수집됩니다.</p>
+<h3 class="text-headline-md font-headline-md text-on-surface mb-2">엑셀 취합</h3>
+<p class="text-body-sm font-body-sm text-on-surface-variant">회신받은 엑셀을 올리면 형식·누락·중복을 먼저 검토하고, 정상인 것만 한 파일로 합칩니다.</p>
 </div>
-</div>
-<div class="p-8 rounded-xl glass-card shadow-soft hover:border-tertiary/30 flex flex-col gap-4 text-center items-center transition-colors">
+</a>
+<a href="hwpx.html" class="p-8 rounded-xl glass-card shadow-soft hover:border-tertiary/30 flex flex-col gap-4 text-center items-center transition-colors">
 <div class="w-14 h-14 rounded-xl bg-tertiary/20 border border-tertiary/30 flex items-center justify-center text-tertiary">
-<span class="material-symbols-outlined text-3xl">verified_user</span>
+<span class="material-symbols-outlined text-3xl">merge</span>
 </div>
 <div>
-<h3 class="text-headline-md font-headline-md text-on-surface mb-2">B2B 보안</h3>
-<p class="text-body-sm font-body-sm text-on-surface-variant">기업용 수준의 데이터 암호화 및 접근 제어를 제공합니다.</p>
+<h3 class="text-headline-md font-headline-md text-on-surface mb-2">한글 병합</h3>
+<p class="text-body-sm font-body-sm text-on-surface-variant">hwpx 문서를 원하는 순서로 이어 붙입니다. 각 문서가 자기 용지·여백·머리말을 유지합니다.</p>
 </div>
-</div>
+</a>
 </div>
 </div>
 <!-- Footer -->
@@ -284,9 +293,9 @@
 <div class="max-w-container-max mx-auto px-gutter py-8 flex flex-col md:flex-row justify-between items-center gap-4">
 <div class="text-label-md font-label-md font-bold text-on-surface opacity-60">© 2024 취합 (Chwi-hap). All rights reserved.</div>
 <div class="flex gap-md">
-<a class="text-body-sm font-body-sm text-on-surface-variant hover:text-primary transition-colors" href="#">이용약관</a>
-<a class="text-body-sm font-body-sm text-on-surface-variant hover:text-primary transition-colors" href="#">개인정보처리방침</a>
-<a class="text-body-sm font-body-sm text-on-surface-variant hover:text-primary transition-colors" href="#">고객지원</a>
+<span class="text-body-sm font-body-sm text-on-surface-variant/60" title="사내 배포 시 연결 예정">이용약관</span>
+<span class="text-body-sm font-body-sm text-on-surface-variant/60" title="사내 배포 시 연결 예정">개인정보처리방침</span>
+<span class="text-body-sm font-body-sm text-on-surface-variant/60" title="사내 배포 시 연결 예정">고객지원</span>
 </div>
 </div>
 </footer>
@@ -345,12 +354,25 @@
   sendBtn.addEventListener('click', goCreate);
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') goCreate(); });
 
-  // 관리자 콘솔 링크는 관리자에게만 드러낸다 (다른 화면의 nav-admin 규칙과 동일)
-  fetch('/api/auth/me').then((r) => r.ok ? r.json() : null).then((me) => {
-    if (me && me.profile && me.profile.role === 'admin') {
-      document.getElementById('nav-admin').classList.remove('hidden');
+  // 로그인 확인 + 사번 표시 + 관리자 링크 (다른 화면과 같은 규칙)
+  fetch('/api/auth/me').then((r) => {
+    if (r.status === 401) { location.href = '/login.html'; return null; }
+    return r.ok ? r.json() : null;
+  }).then((me) => {
+    if (!me || !me.profile) return;
+    if (me.profile.role === 'admin') document.getElementById('nav-admin').classList.remove('hidden');
+    if (me.auth_enabled && me.profile.employee_no) {
+      const who = document.getElementById('nav-user');
+      who.textContent = me.profile.employee_no;
+      who.classList.remove('hidden');
     }
+    if (!me.auth_enabled) document.getElementById('nav-logout').classList.add('hidden');
   }).catch(() => {});
+
+  document.getElementById('nav-logout').addEventListener('click', async () => {
+    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+    location.href = '/login.html';
+  });
 </script>
 </body>
 </html>

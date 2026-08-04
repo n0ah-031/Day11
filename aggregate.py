@@ -911,6 +911,14 @@ def _ai_call(client, model: str, items: list[dict]) -> dict[str, dict]:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
     )
+    # 유료 호출이라 사용량을 남긴다. F1·F6은 `[formgen]`으로 남기는데 2단계 재검증만
+    # 계측이 없어서, 실제로 지배적 비용인 구간의 사용량을 보고할 수 없었다.
+    # 스텁 클라이언트에는 usage가 없다(테스트는 네트워크 없이 돈다).
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        print(f"[aggregate] {model} 토큰 in={usage.prompt_tokens} "
+              f"out={usage.completion_tokens} total={usage.total_tokens} "
+              f"(항목 {len(items)}건)", file=sys.stderr)
     parsed = json.loads(response.choices[0].message.content)
     return {str(r.get("id")): r for r in parsed.get("results", []) if r.get("id")}
 
