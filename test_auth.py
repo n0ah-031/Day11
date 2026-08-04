@@ -418,6 +418,15 @@ def test_form_persistence(client: TestClient):
         assert client.post("/api/form/consent").status_code == 200
         assert client.get("/api/form/consent").json()["consented"] is True
         me = client.get("/api/auth/me").json()["profile"]["id"]
+        # 동의는 1회만 기록한다 (§9.1). 다시 눌러도 시각이 밀리거나 로그가 쌓이면 안 된다
+        first_at = store._rest("GET", "/profiles", params={
+            "id": f"eq.{me}", "select": "ai_consent_at"}).json()[0]["ai_consent_at"]
+        assert client.post("/api/form/consent").status_code == 200
+        again = store._rest("GET", "/profiles", params={
+            "id": f"eq.{me}", "select": "ai_consent_at"}).json()[0]["ai_consent_at"]
+        assert again == first_at, (first_at, again)
+        assert len([r for r in store.list_logs(limit=50)
+                    if r["actor"] == EMP and r["action"] == "AI 전송 동의"]) == 1
         rows = store._rest("GET", "/profiles",
                            params={"id": f"eq.{me}", "select": "ai_consent_at"}).json()
         assert rows[0]["ai_consent_at"], "동의 시각이 남아야 한다"
@@ -474,6 +483,40 @@ def test_form_persistence(client: TestClient):
 
         dl = client.get(f"/api/form/template/{template_id}/download")
         assert dl.status_code == 200 and dl.content[:2] == b"PK", dl.status_code
+        v1 = dl.content
+
+        # F1-7 대화형 수정 — 사양을 고쳐 다시 저작하고 버전을 올린다
+        assert client.post(f"/api/form/{sid}/revise", json={"message": " "}).status_code == 400
+        trimmed = {**spec, "fields": [f for f in spec["fields"] if f["type"] != "text"]}
+        # 고칠 내용이 확정되지 않으면 파일을 건드리지 않고 되묻는다
+        stub.replies.append({"reply": "어떤 항목을 뺄까요?", "spec_json": {}, "spec_complete": True})
+        asked = client.post(f"/api/form/{sid}/revise", json={"message": "하나 빼줘"})
+        assert asked.status_code == 200, asked.text
+        assert asked.json().get("job_id") is None and asked.json()["question"], asked.json()
+        assert store.get_form_template(template_id)["version"] == 1, "되물을 때 버전이 올라갔다"
+
+        stub.replies.append({"reply": "항목-text를 뺐습니다", "spec_json": trimmed,
+                             "spec_complete": True})
+        stub.replies.append(_form_workbook(trimmed))
+        revised = wait(client.post(f"/api/form/{sid}/revise",
+                                   json={"message": "항목-text 항목은 빼줘"}))
+        assert revised["version"] == 2, revised
+        row2 = store.get_form_template(template_id)
+        assert row2["version"] == 2 and row2["file_url"].endswith("_v2.xlsx"), row2
+        assert len(row2["spec_json"]["fields"]) == len(spec["fields"]) - 1, row2["spec_json"]
+        assert row2["workbook_json"] != row["workbook_json"], "저작물이 갱신되지 않았다"
+        # 작성기준도 함께 갈아끼워야 한다 — 파일에 없는 항목이 기준에 남으면 취합이 오판한다
+        after = store._rest("GET", "/field_rules",
+                            params={"form_template_id": f"eq.{template_id}",
+                                    "select": "field_name,rule_type"}).json()
+        assert "text" not in {r["rule_type"] for r in after}, after
+        assert len(after) == len(spec["fields"]) - 1, after
+        # 이전 버전 파일은 남는다(버전별 경로)
+        assert _object_of(store.RESULT_BUCKET, row["file_url"])[:2] == b"PK", row["file_url"]
+        dl2 = client.get(f"/api/form/template/{template_id}/download")
+        assert dl2.status_code == 200 and dl2.content != v1, "최신 버전이 내려오지 않았다"
+        assert "양식 수정 완료" in {r["action"] for r in store.list_logs(limit=50)
+                                if r["actor"] == EMP}
 
         # 감사 로그에 두 액션이 남았는지
         # list_logs는 actor_id 대신 사번(actor)을 내려준다(화면이 쓰는 형태)
@@ -502,7 +545,7 @@ def test_form_persistence(client: TestClient):
         finally:
             _delete_storage_for_owner(other_id)
             _delete_user(other_id)
-        print("  ✓ F1 영속화(문답·양식·작성기준·동의 + 양식 격리)")
+        print("  ✓ F1 영속화(문답·양식·작성기준·동의 + 대화형 수정 v2 + 양식 격리)")
         return project_id
     finally:
         fg._client = real_client
@@ -621,6 +664,9 @@ def test_form_recognize(client: TestClient):
 
         assert store.get_intake_session(sid)["status"] == "closed", "등록 후 문답은 닫힌다"
         assert client.post(f"/api/form/{sid}/register").status_code == 400, "두 번 등록되면 안 된다"
+        # 등록 원본은 재저작 대상이 아니다(인지 E3) — F1-7이 손대면 원본 보존이 깨진다
+        locked = client.post(f"/api/form/{sid}/revise", json={"message": "항목 하나 빼줘"})
+        assert locked.status_code == 400 and "등록된 원본" in locked.json()["detail"], locked.text
         actions = {r["action"] for r in store.list_logs(limit=50) if r["actor"] == EMP}
         assert "양식 등록 완료" in actions, actions
         print("  ✓ F6 인지·등록(무변경 등록·헤더 1:1·작성기준·첨부 구분)")
@@ -755,7 +801,7 @@ def _delete_test_logs() -> None:
     base = os.environ["SUPABASE_URL"].rstrip("/")
     for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료",
                    "한글 병합 완료", "AI 전송 동의", "양식 생성 완료",
-                   "양식 등록 완료"):
+                   "양식 등록 완료", "양식 수정 완료"):
         httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
                      params={"actor_id": "is.null", "action": f"eq.{action}"})
 

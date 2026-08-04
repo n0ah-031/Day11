@@ -712,7 +712,12 @@ async def form_attachments(session_id: str = Form(""), files: list[UploadFile] =
 
 @app.post("/api/form/consent")
 def form_consent(user: dict = User) -> dict:
-    if not _auth_disabled() and user.get("id"):
+    """AI 전송 동의는 **1회만** 기록한다 (명세 §9.1).
+
+    종전에는 누를 때마다 다시 써서 동의 시각이 최신 클릭으로 밀리고 감사 로그가 쌓였다
+    (실측에서 로그가 2건 남았다). 동의 시각은 언제 처음 동의했는지가 기록의 목적이다.
+    """
+    if not _auth_disabled() and user.get("id") and not store.ai_consented(user["id"]):
         store.set_ai_consent(user["id"])
         store.log_action(user["id"], "AI 전송 동의", "")
     return {"ok": True}
@@ -883,6 +888,56 @@ def form_register(sid: str, user: dict = User) -> dict:
     }
 
 
+def _author_job(session: dict, spec: dict, template_id: str, version: int,
+                user: dict, action: str) -> dict:
+    """저작 → 검증 → xlsx → Storage → 기록. 생성(F1-4)과 수정(F1-7)이 같은 경로를 탄다."""
+    model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+    tmp = Path(tempfile.mkdtemp(prefix="form-"))
+
+    def work(report):
+        report("양식 내용을 저작하는 중", 0, 3)
+        try:
+            wb = fg.author_workbook(spec, model,
+                                    on_retry=lambda n, p: report(f"검증 미통과 → 재저작 {n}회차", 1, 3))
+            report("파일로 만드는 중", 2, 3)
+            out = tmp / "form.xlsx"
+            notes = fg.materialize(wb, out)
+            file_url = store.put_form(session["project_id"], template_id, out, version)
+            if version > 1:
+                store.revise_form_template(template_id, version, spec, wb, file_url)
+            else:
+                store.finish_form_template(template_id, wb, file_url)
+            store.save_field_rules(template_id, fg.derive_field_rules(spec))
+            store.update_intake_session(session["id"], status="closed")
+            store.log_action(user.get("id"), action,
+                            f"{spec.get('form_title')} · 항목 {len(spec.get('fields') or [])}개"
+                            + (f" · v{version}" if version > 1 else ""))
+        except fg.FormGenError as exc:
+            if version == 1:
+                store.fail_form_template(template_id, str(exc))
+            # 수정 실패는 이전 버전을 살려둔다 — 쓸 수 있던 양식을 실패 상태로 덮으면
+            # 사용자가 가지고 있던 것까지 잃는다
+            raise HTTPException(503, str(exc))
+        except Exception as exc:
+            if version == 1:
+                store.fail_form_template(template_id, f"{type(exc).__name__}: {exc}")
+            raise
+        report("생성 완료", 3, 3)
+        return {
+            "template_id": template_id,
+            "form_title": spec.get("form_title"),
+            "version": version,
+            "sheets": [{"name": s.get("name"),
+                        "cells": [{"ref": c.get("ref"), "value": c.get("value")}
+                                  for c in (s.get("cells") or [])]}
+                       for s in wb["sheets"]],
+            "rules": fg.rules_for_aggregate(spec),
+            "notes": notes,
+        }
+
+    return _start_job(work, user["id"])
+
+
 @app.post("/api/form/{sid}/generate")
 def form_generate(sid: str, user: dict = User) -> dict:
     """F1-4 양식 파일 생성. 저작·검증·변환을 잡으로 넘긴다."""
@@ -895,42 +950,52 @@ def form_generate(sid: str, user: dict = User) -> dict:
         raise HTTPException(400, "사양이 아직 확정되지 않았습니다: " + ", ".join(gaps[:5]))
 
     template_id = store.create_form_template(session["project_id"], session["id"], spec)
+    return _author_job(session, spec, template_id, 1, user, "양식 생성 완료")
+
+
+@app.post("/api/form/{sid}/revise")
+def form_revise(sid: str, body: dict = Body(...), user: dict = User) -> dict:
+    """F1-7 대화형 수정. "이 항목 빼줘"로 사양을 고쳐 **다시 저작하고** 버전을 올린다.
+
+    새 프롬프트를 만들지 않는다 — 수정 요청은 결국 문답 한 턴이고(`intake_turn`은 이미
+    "사용자가 정정하면 그 지시가 이긴다"를 지시받고 있다), 고쳐진 사양으로 저작·검증·변환을
+    다시 태우면 **사양과 파일이 어긋날 수 없다.** 셀을 직접 고치는 쪽은 검증 관문을 하나 더
+    만들어야 하고, 그 관문을 통과하지 못한 수정본이 사양과 다른 파일로 남는다.
+
+    맞바꾼 것: 파일을 새로 저작하므로 버전 간 레이아웃이 조금 달라질 수 있다. 이전 버전
+    파일은 버전별 경로로 Storage에 남는다.
+    """
+    _require_consent(user)
+    session = _my_session(sid, user)
+    message = (body or {}).get("message", "").strip()
+    if not message:
+        raise HTTPException(400, "무엇을 고칠지 알려주세요.")
+    row = store.template_of_session(session["id"])
+    if row is None:
+        raise HTTPException(400, "수정할 양식이 없습니다. 먼저 양식을 생성해주세요.")
+    if row.get("source") == "recognized_external":
+        # 인지 명세 E3 — 등록 원본은 재저작 대상이 아니다
+        raise HTTPException(400, "등록된 원본 양식은 수정할 수 없습니다. "
+                                 "바꿀 수 있는 것은 작성기준입니다.")
+
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-    tmp = Path(tempfile.mkdtemp(prefix="form-"))
-
-    def work(report):
-        report("양식 내용을 저작하는 중", 0, 3)
-        try:
-            wb = fg.author_workbook(spec, model,
-                                    on_retry=lambda n, p: report(f"검증 미통과 → 재저작 {n}회차", 1, 3))
-            report("파일로 만드는 중", 2, 3)
-            out = tmp / "form.xlsx"
-            notes = fg.materialize(wb, out)
-            file_url = store.put_form(session["project_id"], template_id, out)
-            store.finish_form_template(template_id, wb, file_url)
-            store.save_field_rules(template_id, fg.derive_field_rules(spec))
-            store.update_intake_session(session["id"], status="closed")
-            store.log_action(user.get("id"), "양식 생성 완료",
-                            f"{spec.get('form_title')} · 항목 {len(spec.get('fields') or [])}개")
-        except fg.FormGenError as exc:
-            store.fail_form_template(template_id, str(exc))
-            raise HTTPException(503, str(exc))
-        except Exception as exc:
-            store.fail_form_template(template_id, f"{type(exc).__name__}: {exc}")
-            raise
-        report("생성 완료", 3, 3)
-        return {
-            "template_id": template_id,
-            "form_title": spec.get("form_title"),
-            "sheets": [{"name": s.get("name"),
-                        "cells": [{"ref": c.get("ref"), "value": c.get("value")}
-                                  for c in (s.get("cells") or [])]}
-                       for s in wb["sheets"]],
-            "rules": fg.rules_for_aggregate(spec),
-            "notes": notes,
-        }
-
-    return _start_job(work, user["id"])
+    messages = list(session["messages_json"]) + [{"role": "user", "content": message}]
+    try:
+        out = fg.intake_turn(messages, session.get("spec_json") or {}, model,
+                             attachments=session.get("attachments_json"))
+    except fg.FormGenError as exc:
+        raise HTTPException(503, str(exc))
+    messages = messages + [{"role": "assistant", "content": out["reply"]}]
+    store.update_intake_session(session["id"], messages_json=messages,
+                                spec_json=out["spec_json"], turn_count=out["turn"])
+    if not out["spec_complete"]:
+        # 고칠 내용이 확정되지 않았으면 다시 저작하지 않고 되묻는다. 유료 호출을 아끼는
+        # 것보다, 사양이 빈 채로 만들어진 파일이 나가지 않는 것이 중요하다
+        return {"question": out["reply"], "gaps": out["gaps"], "messages": messages,
+                "spec_json": out["spec_json"]}
+    return _author_job(session, out["spec_json"], row["id"], (row.get("version") or 1) + 1,
+                       user, "양식 수정 완료") | {"question": None, "reply": out["reply"],
+                                              "messages": messages}
 
 
 @app.get("/api/form/template/{template_id}/download")

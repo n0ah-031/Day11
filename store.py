@@ -371,6 +371,26 @@ def fail_form_template(template_id: str, reason: str) -> None:
           json={"status": "failed", "error_message": reason[:500], "updated_at": "now()"})
 
 
+def template_of_session(session_id: str) -> dict | None:
+    """이 문답으로 만든 최신 양식. F1-7 대화형 수정이 무엇을 고칠지 찾는 데 쓴다."""
+    rows = _rest("GET", "/form_templates", params={
+        "intake_session_id": f"eq.{session_id}", "status": "eq.done",
+        "select": "*", "order": "version.desc", "limit": "1"}).json()
+    return rows[0] if rows else None
+
+
+def revise_form_template(template_id: str, version: int, spec: dict, workbook: dict,
+                         file_url: str) -> None:
+    """F1-7 수정 결과를 같은 행에 새 버전으로 올린다.
+
+    행을 새로 만들지 않는 이유는 목록·취합·이력이 늘 최신 버전을 가리켜야 하기 때문이다.
+    이전 버전 파일은 버전별 경로로 Storage에 남는다(`put_form`).
+    """
+    _rest("PATCH", "/form_templates", params={"id": f"eq.{template_id}"},
+          json={"version": version, "spec_json": spec, "workbook_json": workbook,
+                "file_url": file_url, "updated_at": "now()"})
+
+
 def get_form_template(template_id: str) -> dict | None:
     rows = _rest("GET", "/form_templates", params={"id": f"eq.{template_id}", "select": "*"}).json()
     return rows[0] if rows else None

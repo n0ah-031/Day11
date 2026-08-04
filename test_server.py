@@ -112,6 +112,7 @@ def test_form_requires_store():
                       files=[("files", ("양식.xlsx", b"PK\x03\x04", server.XLSX_MIME))])
     assert att.status_code == 503 and "Supabase" in att.json()["detail"], att.text
     assert client.post("/api/form/없는세션/register").status_code == 404
+    assert client.post("/api/form/없는세션/revise", json={"message": "빼줘"}).status_code == 404
     # 인증이 꺼져 있으면 동의는 통과 상태로 본다(로컬 개발)
     assert client.get("/api/form/consent").json() == {"consented": True}
     assert client.get("/api/form/templates").json() == {"templates": []}
