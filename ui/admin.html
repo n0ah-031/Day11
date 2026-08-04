@@ -214,13 +214,40 @@
         class="px-6 py-3 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 transition-all disabled:opacity-40">
 저장
 </button>
-<p class="text-body-sm font-body-sm text-on-surface-variant">기간이 지난 자료의 자동 삭제는 아직 구현되지 않았습니다 — 값만 보관합니다.</p>
 </div>
-<div class="mt-4 flex flex-wrap gap-6 text-body-sm font-body-sm text-on-surface-variant">
-<span>업로드 제한: 파일당 <strong class="text-on-surface">50MB</strong></span>
-<span>1회 최대 <strong class="text-on-surface">30개</strong></span>
-<span>합계 <strong class="text-on-surface">500MB</strong></span>
-<span class="text-on-surface-variant">(서버 상수 — 화면에서 바꾸는 기능은 미구현)</span>
+
+<!-- 보관 기간 정리 — 무엇이 지워질지 먼저 세어 보인다 -->
+<div class="mt-4 rounded-xl bg-surface-variant/50 px-5 py-4">
+<div class="flex flex-wrap items-center gap-4">
+<button id="preview-purge"
+        class="px-5 py-2.5 rounded-xl border border-outline-variant text-label-md font-label-md font-semibold hover:border-primary transition-all disabled:opacity-40">지울 대상 확인</button>
+<button id="run-purge" disabled
+        class="px-5 py-2.5 rounded-xl bg-error/90 text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 transition-all disabled:opacity-40">지금 정리</button>
+<p id="purge-info" class="text-body-sm font-body-sm text-on-surface-variant">보관 기간이 지난 취합·병합 작업과 그 파일을 지웁니다. 양식은 두고두고 다시 쓰는 자산이라 대상에서 빠집니다.</p>
+</div>
+<p class="mt-2 text-body-sm font-body-sm text-on-surface-variant">주기 실행은 cron에 맡깁니다 — <code>python3 manage_users.py purge-expired</code>.</p>
+</div>
+
+<!-- 업로드 제한 -->
+<div class="mt-4 flex flex-wrap items-end gap-4">
+<label class="flex flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">파일당(MB)</span>
+<input id="max-file-mb" type="number" min="1" max="500" step="1"
+       class="w-32 rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</label>
+<label class="flex flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">1회 최대(개)</span>
+<input id="max-session-files" type="number" min="1" max="500" step="1"
+       class="w-32 rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</label>
+<label class="flex flex-col gap-2">
+<span class="text-body-sm font-body-sm font-semibold text-on-surface">합계(MB)</span>
+<input id="max-session-mb" type="number" min="1" max="5000" step="1"
+       class="w-32 rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+</label>
+<button id="save-limits"
+        class="px-6 py-3 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 transition-all disabled:opacity-40">저장</button>
+<p class="text-body-sm font-body-sm text-on-surface-variant">업로드 화면의 안내 문구도 이 값을 그대로 씁니다.</p>
 </div>
 </section>
 
@@ -427,6 +454,72 @@
     }
   });
 
+  /** 보관 기간 정리 — 지우기 전에 무엇이 지워질지 센다. */
+  let purgePlan = null;
+  $('preview-purge').addEventListener('click', async () => {
+    clearError();
+    $('preview-purge').disabled = true;
+    try {
+      purgePlan = await api('/api/admin/retention/preview');
+      const mb = (purgePlan.bytes / 1024 / 1024).toFixed(1);
+      $('purge-info').textContent =
+        `기준 ${purgePlan.days}일(${purgePlan.cutoff.slice(0, 10)} 이전) · 작업 ${purgePlan.projects.length}건`
+        + ` · 파일 ${purgePlan.files}건 · ${mb}MB`
+        + (purgePlan.kept_with_templates
+            ? ` · 양식이 있어 남겨둘 프로젝트 ${purgePlan.kept_with_templates}건` : '');
+      $('run-purge').disabled = purgePlan.projects.length === 0;
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      $('preview-purge').disabled = false;
+    }
+  });
+
+  $('run-purge').addEventListener('click', async () => {
+    if (!purgePlan || !purgePlan.projects.length) return;
+    if (!confirm(`작업 ${purgePlan.projects.length}건과 그 파일 ${purgePlan.files}건을 지웁니다. `
+                 + '되돌릴 수 없습니다. 계속할까요?')) return;
+    clearError();
+    $('run-purge').disabled = true;
+    try {
+      const out = await api('/api/admin/retention/purge', json('POST', {}));
+      $('purge-info').textContent =
+        `작업 ${out.purged}건·파일 ${out.files}건을 지웠습니다.`
+        + (out.kept_with_templates ? ` 양식이 있는 ${out.kept_with_templates}건은 남겼습니다.` : '');
+      purgePlan = null;
+      await Promise.all([loadDashboard(), loadLogs()]);
+    } catch (e) {
+      showError(e.message);
+      $('run-purge').disabled = false;
+    }
+  });
+
+  /** 업로드 제한 — 화면 문구와 검사가 같은 값을 본다. */
+  async function loadLimits() {
+    const l = await api('/api/limits');
+    $('max-file-mb').value = l.max_file_mb;
+    $('max-session-files').value = l.max_session_files;
+    $('max-session-mb').value = l.max_session_mb;
+  }
+
+  $('save-limits').addEventListener('click', async () => {
+    clearError();
+    $('save-limits').disabled = true;
+    try {
+      await api('/api/admin/policy/limits', json('PUT', {
+        max_file_mb: parseInt($('max-file-mb').value, 10),
+        max_session_files: parseInt($('max-session-files').value, 10),
+        max_session_mb: parseInt($('max-session-mb').value, 10),
+      }));
+      showNotice('업로드 제한을 저장했습니다.');
+      await Promise.all([loadLimits(), loadLogs()]);
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      $('save-limits').disabled = false;
+    }
+  });
+
   async function loadLogs() {
     const q = $('log-q').value.trim();
     const { logs } = await api('/api/admin/logs' + (q ? `?q=${encodeURIComponent(q)}` : ''));
@@ -461,7 +554,7 @@
       $('nav-user').classList.remove('hidden');
     }
     try {
-      await Promise.all([loadDashboard(), loadAccounts(), loadLogs()]);
+      await Promise.all([loadDashboard(), loadAccounts(), loadLogs(), loadLimits()]);
     } catch (e) {
       showError(e.message);
     }

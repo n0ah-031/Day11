@@ -32,9 +32,10 @@ import hwpx_merge as hm
 import store
 
 BASE = Path(__file__).parent
-MAX_FILE_MB = 50            # 파일 1개 상한
-MAX_SESSION_FILES = 30      # 세션 누적 파일 수 상한
-MAX_SESSION_MB = 500        # 세션 누적 용량 상한
+# 업로드 상한은 `_limits()`가 정책에서 읽는다(기본값은 store.DEFAULT_LIMITS) — Admin에서
+# 바꿀 수 있어야 하고, 화면 문구와 검사가 같은 값을 봐야 한다(종전에는 상수 하나와 화면
+# 세 곳의 문구가 따로 적혀 있어 상한을 바꾸면 화면이 거짓말을 하게 돼 있었다).
+RETENTION_DEFAULT_DAYS = 90
 SESSION_TTL_H = 6           # 이 시간이 지난 세션의 임시 폴더는 지운다 (F3-5)
 MAX_ATTACHMENTS = 5         # 문답 세션당 첨부 상한 (인지 J6)
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -89,6 +90,22 @@ def _apply_dept_names(session: dict) -> None:
         chosen = (names.get(str(fid)) or "").strip()
         if chosen:
             uf.dept = chosen
+
+
+def _limits() -> dict:
+    """업로드 상한. Supabase가 없으면(로컬 개발) 기본값으로 돈다."""
+    if not store.enabled():
+        return dict(store.DEFAULT_LIMITS)
+    try:
+        return store.get_limits()
+    except Exception:
+        # 정책을 못 읽는다고 업로드를 막을 이유는 없다. 기본값으로 진행한다
+        return dict(store.DEFAULT_LIMITS)
+
+
+def _retention_days() -> int:
+    days = store.get_policy().get("retention_days")
+    return int(days) if str(days).isdigit() else RETENTION_DEFAULT_DAYS
 
 
 def _session(sid: str, user: dict) -> dict:
@@ -218,9 +235,61 @@ def admin_set_retention(body: dict = Body(...), admin: dict = Admin) -> dict:
     return {"policy": policy}
 
 
+@app.put("/api/admin/policy/limits")
+def admin_set_limits(body: dict = Body(...), admin: dict = Admin) -> dict:
+    """업로드 상한 변경. 화면·검사가 같은 값을 보게 정책 한 곳에 둔다."""
+    bounds = {"max_file_mb": (1, 500), "max_session_files": (1, 500),
+              "max_session_mb": (1, 5000)}
+    changed = {}
+    for key, (lo, hi) in bounds.items():
+        if key not in (body or {}):
+            continue
+        value = body[key]
+        if not isinstance(value, int) or not lo <= value <= hi:
+            raise HTTPException(400, f"{key}는 {lo}~{hi} 사이의 정수로 입력해주세요.")
+        changed[key] = value
+    if not changed:
+        raise HTTPException(400, "바꿀 항목이 없습니다.")
+    for key, value in changed.items():
+        store.set_policy(key, value, admin.get("id"))
+    store.log_action(admin.get("id"), "정책 변경",
+                     ", ".join(f"{k}={v}" for k, v in changed.items()))
+    return {"limits": store.get_limits()}
+
+
+@app.get("/api/admin/retention/preview")
+def admin_retention_preview(admin: dict = Admin) -> dict:
+    """무엇이 지워질지 먼저 보여준다. 지우기 전에 세어 보이지 않으면 되돌릴 수 없다."""
+    return store.expired_projects(_retention_days())
+
+
+@app.post("/api/admin/retention/purge")
+def admin_retention_purge(admin: dict = Admin) -> dict:
+    """F4-3 보관 기간 정리 — 기간이 지난 작업과 그 파일을 실제로 지운다.
+
+    자동 실행(타이머)은 넣지 않았다. 이 서버는 세션·잡을 프로세스 메모리에 두는 도구라
+    재시작이 잦고, 타이머로 무인 삭제를 돌리면 언제 무엇이 지워졌는지 아무도 모른다.
+    주기 실행이 필요하면 cron이 `python3 manage_users.py purge-expired`를 부르면 된다.
+    """
+    days = _retention_days()
+    plan = store.expired_projects(days)
+    ids = [p["id"] for p in plan["projects"]]
+    store.purge_projects(ids)
+    store.log_action(admin.get("id"), "보관 기간 정리",
+                     f"기준 {days}일 · 작업 {len(ids)}건 · 파일 {plan['files']}건")
+    return {"purged": len(ids), "files": plan["files"], "bytes": plan["bytes"],
+            "kept_with_templates": plan["kept_with_templates"], "days": days}
+
+
 @app.get("/api/admin/logs")
 def admin_logs(q: str = "", admin: dict = Admin) -> dict:
     return {"logs": store.list_logs(q=q)}
+
+
+@app.get("/api/limits")
+def api_limits(user: dict = User) -> dict:
+    """업로드 상한. 화면이 문구를 여기서 채운다(세 곳에 따로 적어 두면 어긋난다)."""
+    return _limits()
 
 
 @app.get("/api/history")
@@ -326,18 +395,19 @@ async def _save_uploads(session: dict, files: list[UploadFile], ext: str) -> lis
     엑셀 취합(F2)과 한글 병합(F3-6)이 같은 상한을 쓴다.
     """
     hint = FORMATS[ext][0]
+    limits = _limits()
     pending: list[Path] = []
     for up in files:
         name = Path(up.filename or "").name
         if not name.lower().endswith("." + ext):
             raise HTTPException(400, f"'{name}'은(는) .{ext} 파일이 아닙니다. {hint}")
         data = await up.read()
-        if len(data) > MAX_FILE_MB * 1024 * 1024:
-            raise HTTPException(400, f"'{name}'의 용량이 {MAX_FILE_MB}MB를 초과합니다.")
-        if len(session["files"]) + len(pending) + 1 > MAX_SESSION_FILES:
-            raise HTTPException(400, f"업로드 가능한 파일은 최대 {MAX_SESSION_FILES}개입니다.")
-        if session["bytes"] + len(data) > MAX_SESSION_MB * 1024 * 1024:
-            raise HTTPException(400, f"업로드 총 용량이 {MAX_SESSION_MB}MB를 초과합니다.")
+        if len(data) > limits["max_file_mb"] * 1024 * 1024:
+            raise HTTPException(400, f"'{name}'의 용량이 {limits['max_file_mb']}MB를 초과합니다.")
+        if len(session["files"]) + len(pending) + 1 > limits["max_session_files"]:
+            raise HTTPException(400, f"업로드 가능한 파일은 최대 {limits['max_session_files']}개입니다.")
+        if session["bytes"] + len(data) > limits["max_session_mb"] * 1024 * 1024:
+            raise HTTPException(400, f"업로드 총 용량이 {limits['max_session_mb']}MB를 초과합니다.")
         path = session["dir"] / name
         if path.exists():
             # 같은 이름이 또 오면 덮어쓰지 않는다 — 병합 순서에 둘 다 들어갈 수 있다
@@ -675,8 +745,9 @@ async def form_attachments(session_id: str = Form(""), files: list[UploadFile] =
             if len(attachments) + 1 > MAX_ATTACHMENTS:
                 raise HTTPException(400, f"첨부는 최대 {MAX_ATTACHMENTS}개입니다.")
             data = await up.read()
-            if len(data) > MAX_FILE_MB * 1024 * 1024:
-                raise HTTPException(400, f"'{name}'의 용량이 {MAX_FILE_MB}MB를 초과합니다.")
+            cap = _limits()["max_file_mb"]
+            if len(data) > cap * 1024 * 1024:
+                raise HTTPException(400, f"'{name}'의 용량이 {cap}MB를 초과합니다.")
             path = tmp / f"{uuid.uuid4().hex}{ext}"
             path.write_bytes(data)
 

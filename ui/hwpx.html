@@ -476,7 +476,12 @@
   });
 
   (async function boot() {
-    $('limits').textContent = '파일당 50MB · 최대 30개 · 합계 500MB';
+    // 상한은 서버 정책이 정한다(Admin에서 바꿀 수 있다). 화면에 따로 적어 두면 어긋난다
+    try {
+      const l = await api('/api/limits');
+      $('limits').textContent =
+        `파일당 ${l.max_file_mb}MB · 최대 ${l.max_session_files}개 · 합계 ${l.max_session_mb}MB`;
+    } catch (e) { /* 못 읽으면 기본 문구를 그대로 둔다 */ }
     try {
       const me = await api('/api/auth/me');
       if (me.profile?.employee_no) {

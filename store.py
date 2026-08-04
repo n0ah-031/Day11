@@ -295,6 +295,59 @@ def set_policy(key: str, value, actor_id: str) -> dict:
     return get_policy()
 
 
+DEFAULT_LIMITS = {"max_file_mb": 50, "max_session_files": 30, "max_session_mb": 500}
+
+
+def get_limits() -> dict:
+    """업로드 상한. 정책에 값이 있으면 그것을, 없으면 기본값을 쓴다.
+
+    화면·API·검사가 한 곳을 보게 하려고 정책으로 옮겼다 — 종전에는 server.py 상수와
+    화면 세 곳의 문구가 따로 적혀 있어서, 상한을 바꾸면 화면이 거짓말을 하게 돼 있었다.
+    """
+    policy = get_policy()
+    return {key: int(policy.get(key) or default) for key, default in DEFAULT_LIMITS.items()}
+
+
+def expired_projects(days: int) -> dict:
+    """보관 기간이 지난 작업을 찾는다. **양식을 담은 프로젝트는 대상에서 뺀다.**
+
+    양식은 두고두고 다시 쓰는 자산이라 보관 기간의 대상이 아니다 — 91일 전에 만든 양식으로
+    이번 분기 회신을 받을 수 있다. 대상에서 뺀 개수를 함께 돌려줘 화면에서 밝힌다.
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = _rest("GET", "/projects", params={
+        "created_at": f"lt.{cutoff}",
+        "select": "id,name,owner_id,created_at,form_templates(id),uploaded_files(size_bytes)",
+        "order": "created_at"}).json()
+    targets = [r for r in rows if not (r.get("form_templates") or [])]
+    files = [f for r in targets for f in (r.get("uploaded_files") or [])]
+    return {
+        "days": days,
+        "cutoff": cutoff,
+        "projects": [{"id": r["id"], "name": r["name"], "owner_id": r["owner_id"],
+                      "created_at": r["created_at"],
+                      "files": len(r.get("uploaded_files") or [])} for r in targets],
+        "kept_with_templates": len(rows) - len(targets),
+        "files": len(files),
+        "bytes": sum(f.get("size_bytes") or 0 for f in files),
+    }
+
+
+def purge_projects(project_ids: list[str]) -> int:
+    """프로젝트와 그 자료를 지운다. Storage를 먼저 비운다(계정 삭제와 같은 순서).
+
+    DB는 projects → uploaded_files·review_results·aggregation_jobs·intake_sessions까지
+    CASCADE로 사라진다. Storage 객체는 CASCADE 대상이 아니라 여기서 지워야 한다.
+    """
+    for pid in project_ids:
+        for bucket in (UPLOAD_BUCKET, RESULT_BUCKET):
+            _empty_folder(bucket, pid)
+    if project_ids:
+        _rest("DELETE", "/projects", params={"id": f"in.({','.join(project_ids)})"})
+    return len(project_ids)
+
+
 def log_action(actor_id: str | None, action: str, target: str = "") -> None:
     """감사 로그. 기록 실패가 본 작업을 막지는 않는다."""
     try:

@@ -736,6 +736,52 @@ def test_admin_console(client: TestClient):
                  if x["action"] == "테스트 행위"]
         assert after and after[0]["actor"] == "(삭제된 계정)", after
 
+        # 업로드 제한 — 정책으로 바꾼 값이 화면·검사가 보는 값이어야 한다
+        assert client.put("/api/admin/policy/limits",
+                          json={"max_file_mb": 0}).status_code == 400
+        assert client.put("/api/admin/policy/limits", json={}).status_code == 400
+        saved = client.put("/api/admin/policy/limits", json={"max_file_mb": 7})
+        assert saved.status_code == 200 and saved.json()["limits"]["max_file_mb"] == 7, saved.text
+        assert client.get("/api/limits").json()["max_file_mb"] == 7
+        # 상한을 넘는 업로드는 실제로 막혀야 한다(문구만 바뀌면 의미가 없다)
+        big_sid = client.post("/api/session").json()["sid"]
+        big = client.post(f"/api/session/{big_sid}/files", files=[
+            ("files", ("큰파일.xlsx", b"0" * (8 * 1024 * 1024), "application/octet-stream"))])
+        assert big.status_code == 400 and "7MB" in big.json()["detail"], big.text
+        # 정책은 시스템 설정이라 테스트가 만든 키는 지워 원래 상태로 되돌린다
+        store._rest("DELETE", "/retention_policy", params={"key": "eq.max_file_mb"})
+        assert client.get("/api/limits").json()["max_file_mb"] == \
+            store.DEFAULT_LIMITS["max_file_mb"]
+
+        # 보관 기간 정리 — 기간이 지난 작업만, 양식이 있는 프로젝트는 남긴다
+        old_id = store.create_project(created_user_id, "zz-test 오래된 작업")
+        keep_id = store.create_project(created_user_id, "zz-test 양식 있는 작업")
+        kept_template = store.register_form_template(keep_id, None, {"form_title": "zz"},
+                                                    f"{keep_id}/none.xlsx")
+        long_ago = "2000-01-01T00:00:00+00:00"
+        for pid in (old_id, keep_id):
+            store._rest("PATCH", "/projects", params={"id": f"eq.{pid}"},
+                        json={"created_at": long_ago})
+        plan = client.get("/api/admin/retention/preview")
+        assert plan.status_code == 200, plan.text
+        ids = [p["id"] for p in plan.json()["projects"]]
+        assert old_id in ids, plan.json()
+        assert keep_id not in ids, "양식이 있는 프로젝트를 지우려 한다"
+        assert plan.json()["kept_with_templates"] >= 1, plan.json()
+
+        # 실데이터를 지울 수 있는 호출이라, 대상이 테스트 소유인지 확인하고 돈다
+        owners = {p["owner_id"] for p in plan.json()["projects"]}
+        if owners <= {created_user_id}:
+            done = client.post("/api/admin/retention/purge")
+            assert done.status_code == 200 and done.json()["purged"] == len(ids), done.text
+            assert store._rest("GET", "/projects",
+                               params={"id": f"eq.{old_id}", "select": "id"}).json() == []
+            assert store._rest("GET", "/projects",
+                               params={"id": f"eq.{keep_id}", "select": "id"}).json(), "남겨야 한다"
+        else:
+            print("    (건너뜀: 테스트 소유가 아닌 만료 프로젝트가 있어 정리를 돌리지 않았다)")
+        store.purge_projects([keep_id])          # 테스트가 만든 것은 걷어낸다
+
         # 감사 로그에 방금 한 일이 남아야 한다
         logs = client.get("/api/admin/logs").json()["logs"]
         actions = [x["action"] for x in logs]
@@ -744,7 +790,7 @@ def test_admin_console(client: TestClient):
         # 검색 필터
         only = client.get("/api/admin/logs?q=정책").json()["logs"]
         assert only and all("정책" in x["action"] or "정책" in (x["target"] or "") for x in only), only
-        print("  ✓ Admin 콘솔(권한 403 / 지표 / 계정 변경·삭제 / 정책 / 감사 로그)")
+        print("  ✓ Admin 콘솔(권한 403 / 지표 / 계정 / 업로드 제한 / 보관 정리 / 감사 로그)")
     finally:
         client.put("/api/admin/policy/retention", json={"retention_days": 90})
         manage_users.main(["demote", EMP])
@@ -801,7 +847,7 @@ def _delete_test_logs() -> None:
     base = os.environ["SUPABASE_URL"].rstrip("/")
     for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료",
                    "한글 병합 완료", "AI 전송 동의", "양식 생성 완료",
-                   "양식 등록 완료", "양식 수정 완료"):
+                   "양식 등록 완료", "양식 수정 완료", "보관 기간 정리"):
         httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
                      params={"actor_id": "is.null", "action": f"eq.{action}"})
 

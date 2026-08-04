@@ -10,6 +10,12 @@ Admin 화면이 아직 없어 role·status를 바꿀 방법이 없으므로 서�
     python3 manage_users.py demote  admin01      # role → user
     python3 manage_users.py suspend 12345        # status → suspended
     python3 manage_users.py activate 12345       # status → active
+
+보관 기간 정리도 여기서 돌린다 — 주기 실행은 cron에 맡긴다(서버에 타이머를 두면
+재시작이 잦아 언제 무엇이 지워졌는지 알 수 없다).
+
+    python3 manage_users.py purge-expired --dry-run   # 지울 대상만 센다
+    python3 manage_users.py purge-expired             # 실제로 지운다
 """
 
 from __future__ import annotations
@@ -76,6 +82,34 @@ COMMANDS = {
 }
 
 
+def cmd_purge_expired(dry_run: bool) -> int:
+    """보관 기간이 지난 작업과 그 파일을 지운다 (F4-3).
+
+    양식을 담은 프로젝트는 대상에서 빠진다(두고두고 다시 쓰는 자산이라 보관 기간의
+    대상이 아니다). 몇 건이 그렇게 빠졌는지 함께 찍는다.
+    """
+    import store
+    days = store.get_policy().get("retention_days")
+    days = int(days) if str(days).isdigit() else 90
+    plan = store.expired_projects(days)
+    print(f"기준 {days}일 (이전: {plan['cutoff'][:10]}) · 대상 작업 {len(plan['projects'])}건 · "
+          f"파일 {plan['files']}건 · {plan['bytes'] / 1024 / 1024:.1f}MB")
+    if plan["kept_with_templates"]:
+        print(f"  · 양식이 있어 남겨둔 프로젝트 {plan['kept_with_templates']}건")
+    for row in plan["projects"]:
+        print(f"  - {row['created_at'][:10]} {row['name']} (파일 {row['files']}건)")
+    if dry_run:
+        print("--dry-run: 지우지 않았습니다.")
+        return 0
+    if not plan["projects"]:
+        return 0
+    store.purge_projects([row["id"] for row in plan["projects"]])
+    store.log_action(None, "보관 기간 정리",
+                     f"기준 {days}일 · 작업 {len(plan['projects'])}건 · 파일 {plan['files']}건 (CLI)")
+    print(f"{len(plan['projects'])}건을 지웠습니다.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not auth.configured():
@@ -84,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not argv or argv[0] == "list":
         return cmd_list()
+    if argv[0] == "purge-expired":
+        return cmd_purge_expired("--dry-run" in argv)
     action = argv[0]
     if action not in COMMANDS or len(argv) < 2:
         print(__doc__)

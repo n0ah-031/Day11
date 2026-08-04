@@ -246,7 +246,7 @@
 <div id="dropzone" class="rounded-xl border-2 border-dashed border-outline bg-surface glow-border shadow-soft hover:shadow-soft-hover hover:border-primary/60 transition-all p-xl text-center cursor-pointer">
 <span class="material-symbols-outlined text-5xl text-primary">upload_file</span>
 <p class="text-body-lg font-body-lg text-on-surface mt-3">파일을 여기로 끌어다 놓거나 클릭해서 선택하세요</p>
-<p class="text-body-sm font-body-sm text-on-surface-variant mt-1">xlsx · 파일당 최대 50MB · 1회 최대 30개</p>
+<p id="limits" class="text-body-sm font-body-sm text-on-surface-variant mt-1">xlsx · 파일당 최대 50MB · 1회 최대 30개</p>
 <input id="file-input" type="file" multiple accept=".xlsx" class="hidden">
 </div>
 
@@ -441,6 +441,18 @@ AI 검증 없이 빠르게 검토
     $('nav-user').textContent = profile.employee_no;
     $('nav-user').classList.remove('hidden');
     if (profile.role === 'admin') $('nav-admin').classList.remove('hidden');
+  })();
+
+  // 업로드 상한은 서버 정책이 정한다(Admin에서 바꿀 수 있다). 화면에 따로 적어 두면 어긋난다
+  (async function showLimits() {
+    try {
+      const res = await fetch('/api/limits');
+      if (!res.ok) return;
+      const l = await res.json();
+      $('limits').textContent =
+        `xlsx · 파일당 최대 ${l.max_file_mb}MB · 1회 최대 ${l.max_session_files}개`
+        + ` · 합계 ${l.max_session_mb}MB`;
+    } catch (e) { /* 못 읽으면 기본 문구를 그대로 둔다 */ }
   })();
 
   $('nav-logout').addEventListener('click', async () => {
