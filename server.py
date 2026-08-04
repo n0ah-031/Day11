@@ -781,6 +781,34 @@ async def form_attachments(session_id: str = Form(""), files: list[UploadFile] =
             "attachments": _attachment_view(session)}
 
 
+@app.patch("/api/form/{sid}/attachments/{aid}/primary")
+def form_mark_primary(sid: str, aid: str, user: dict = User) -> dict:
+    """F6 §5.2 등록 대상 지정. xlsx를 2개 이상 붙였을 때 무엇을 등록할지 바꾼다.
+
+    첨부를 지우는 기능은 없으므로, 첫 파일이 등록 대상이 되는 규칙만으로는 순서를 잘못
+    올렸을 때 문답을 새로 시작해야 했다.
+    """
+    session = _my_session(sid, user)
+    attachments = list(session.get("attachments_json") or [])
+    target = next((a for a in attachments if a.get("id") == aid), None)
+    if target is None:
+        raise HTTPException(404, "첨부를 찾을 수 없습니다.")
+    if not target.get("structural"):
+        raise HTTPException(400, "이 파일은 등록 대상이 될 수 없습니다(구조를 읽지 못했습니다).")
+    for a in attachments:
+        a.pop("primary", None)
+        # 업로드 때 붙인 안내는 그때의 등록 대상 기준이다. 바꿔 놓고 그대로 두면
+        # 같은 줄에 '등록 대상'과 '참고 자료로만 씁니다'가 함께 뜬다(실측에서 그랬다)
+        if a is not target and a.get("structural"):
+            a["note"] = "등록 대상 양식이 이미 있어 참고 자료로만 씁니다."
+    target["primary"] = True
+    if target.get("structural"):
+        target.pop("note", None)
+    store.update_intake_session(session["id"], attachments_json=attachments)
+    session["attachments_json"] = attachments
+    return {"mode": "recognize", "attachments": _attachment_view(session)}
+
+
 @app.post("/api/form/consent")
 def form_consent(user: dict = User) -> dict:
     """AI 전송 동의는 **1회만** 기록한다 (명세 §9.1).
@@ -820,6 +848,40 @@ def form_template_rules(template_id: str, user: dict = User) -> dict:
     if rules is None:
         raise HTTPException(404, "작성기준을 찾을 수 없습니다.")
     return {"rules": rules}
+
+
+@app.patch("/api/form/templates/{template_id}/rules")
+def form_patch_rules(template_id: str, body: dict = Body(...), user: dict = User) -> dict:
+    """F6-7 작성기준 보정. **원본 파일과 버전은 건드리지 않는다**(인지 E3·§5.4).
+
+    받는 모양은 `GET .../rules`가 내려주는 것과 같다(`{헤더명: {"required": bool}}`) —
+    취합 화면이 이미 그 모양을 먹으므로 새 계약을 만들지 않는다.
+    """
+    if not store.enabled() or not user.get("id"):
+        raise HTTPException(404, "작성기준을 찾을 수 없습니다.")
+    if store.rules_of_template(user["id"], template_id) is None:
+        raise HTTPException(404, "작성기준을 찾을 수 없습니다.")   # 남의 것은 존재를 알리지 않는다
+    row = store.get_form_template(template_id)
+    spec = row.get("spec_json") or {}
+    wanted = (body or {}).get("rules")
+    if not isinstance(wanted, dict) or not wanted:
+        raise HTTPException(400, "바꿀 작성기준이 없습니다.")
+
+    names = {(f.get("name") or "").strip() for f in spec.get("fields") or []}
+    unknown = [k for k in wanted if k not in names]
+    if unknown:
+        # 양식에 없는 항목을 기준에 넣으면 근거 없는 기준이 생긴다
+        raise HTTPException(400, "양식에 없는 항목입니다: " + ", ".join(unknown[:5]))
+    for field in spec.get("fields") or []:
+        want = wanted.get((field.get("name") or "").strip())
+        if isinstance(want, dict) and isinstance(want.get("required"), bool):
+            field["required"] = want["required"]
+            field["confidence"] = "high"        # 사용자가 직접 정한 것이 가장 확실한 근거다
+    store.update_form_spec(template_id, spec)
+    store.save_field_rules(template_id, fg.derive_field_rules(spec))
+    store.log_action(user.get("id"), "작성기준 변경",
+                     f"{spec.get('form_title')} · 항목 {len(spec.get('fields') or [])}개")
+    return {"rules": fg.rules_for_aggregate(spec)}
 
 
 @app.post("/api/form/session")

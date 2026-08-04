@@ -629,6 +629,24 @@ def test_form_recognize(client: TestClient):
         assert restored["mode"] == "recognize" and restored["gaps"] == [], restored
         assert len(restored["attachments"]) == 2, restored["attachments"]
 
+        # 등록 대상 바꾸기(인지 §5.2) — xlsx가 둘이면 무엇을 등록할지 고를 수 있어야 한다
+        second = client.post("/api/form/attachments", data={"session_id": sid}, files=[
+            ("files", ("다른양식.xlsx", original, server.XLSX_MIME))])
+        assert second.status_code == 200, second.text
+        views = second.json()["attachments"]
+        first_x = next(a for a in views if a["kind"] == "xlsx" and a["primary"])
+        other_x = next(a for a in views if a["kind"] == "xlsx" and not a["primary"])
+        assert "참고 자료로만" in (other_x["note"] or ""), other_x
+        swapped = client.patch(f"/api/form/{sid}/attachments/{other_x['id']}/primary")
+        assert swapped.status_code == 200, swapped.text
+        marked = [a for a in swapped.json()["attachments"] if a["primary"]]
+        assert len(marked) == 1 and marked[0]["id"] == other_x["id"], marked
+        # hwpx는 등록 대상이 될 수 없다
+        assert client.patch(
+            f"/api/form/{sid}/attachments/{hwpx_att['id']}/primary").status_code == 400
+        # 원래대로 돌려놓고 등록을 이어간다
+        assert client.patch(f"/api/form/{sid}/attachments/{first_x['id']}/primary").status_code == 200
+
         # 등록 — 동기 응답이다(잡·폴링 없음)
         reg = client.post(f"/api/form/{sid}/register")
         assert reg.status_code == 200, reg.text
@@ -664,12 +682,30 @@ def test_form_recognize(client: TestClient):
 
         assert store.get_intake_session(sid)["status"] == "closed", "등록 후 문답은 닫힌다"
         assert client.post(f"/api/form/{sid}/register").status_code == 400, "두 번 등록되면 안 된다"
+        # F6-7 작성기준 보정 — 원본 파일·버전은 그대로 두고 기준만 고친다
+        assert client.patch(f"/api/form/templates/{template_id}/rules",
+                            json={"rules": {}}).status_code == 400
+        assert client.patch(f"/api/form/templates/{template_id}/rules",
+                            json={"rules": {"없는항목": {"required": True}}}).status_code == 400
+        flipped = client.patch(f"/api/form/templates/{template_id}/rules",
+                               json={"rules": {headers[0]: {"required": False}}})
+        assert flipped.status_code == 200, flipped.text
+        assert flipped.json()["rules"][headers[0]] == {"required": False}, flipped.json()
+        after = store.get_form_template(template_id)
+        assert after["version"] == 1 and after["file_url"] == row["file_url"], after
+        assert client.get(f"/api/form/template/{template_id}/download").content == original, \
+            "작성기준만 고쳤는데 원본이 바뀌었다"
+        saved_rule = next(r for r in store._rest("GET", "/field_rules", params={
+            "form_template_id": f"eq.{template_id}",
+            "select": "field_name,rule_config_json"}).json() if r["field_name"] == headers[0])
+        assert saved_rule["rule_config_json"]["required"] is False, saved_rule
+
         # 등록 원본은 재저작 대상이 아니다(인지 E3) — F1-7이 손대면 원본 보존이 깨진다
         locked = client.post(f"/api/form/{sid}/revise", json={"message": "항목 하나 빼줘"})
         assert locked.status_code == 400 and "등록된 원본" in locked.json()["detail"], locked.text
         actions = {r["action"] for r in store.list_logs(limit=50) if r["actor"] == EMP}
         assert "양식 등록 완료" in actions, actions
-        print("  ✓ F6 인지·등록(무변경 등록·헤더 1:1·작성기준·첨부 구분)")
+        print("  ✓ F6 인지·등록(무변경 등록·헤더 1:1·등록 대상 바꾸기·작성기준 보정)")
     finally:
         fg._client = real_client
         shutil.rmtree(tmp, ignore_errors=True)
@@ -847,7 +883,8 @@ def _delete_test_logs() -> None:
     base = os.environ["SUPABASE_URL"].rstrip("/")
     for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료",
                    "한글 병합 완료", "AI 전송 동의", "양식 생성 완료",
-                   "양식 등록 완료", "양식 수정 완료", "보관 기간 정리"):
+                   "양식 등록 완료", "양식 수정 완료", "보관 기간 정리",
+                   "작성기준 변경"):
         httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
                      params={"actor_id": "is.null", "action": f"eq.{action}"})
 

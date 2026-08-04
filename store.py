@@ -444,6 +444,12 @@ def revise_form_template(template_id: str, version: int, spec: dict, workbook: d
                 "file_url": file_url, "updated_at": "now()"})
 
 
+def update_form_spec(template_id: str, spec: dict) -> None:
+    """작성기준 보정(F6-7). 파일·버전은 그대로 두고 사양만 고친다(인지 E3)."""
+    _rest("PATCH", "/form_templates", params={"id": f"eq.{template_id}"},
+          json={"spec_json": spec, "updated_at": "now()"})
+
+
 def get_form_template(template_id: str) -> dict | None:
     rows = _rest("GET", "/form_templates", params={"id": f"eq.{template_id}", "select": "*"}).json()
     return rows[0] if rows else None
