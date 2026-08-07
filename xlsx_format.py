@@ -254,6 +254,10 @@ def open_sheet(ws, tpl: FormatTemplate, out_headers: list) -> int:
             ws.unmerge_cells(str(rng))
         if ws.max_row:
             ws.delete_rows(1, ws.max_row)
+        # delete_rows는 row_dimensions의 커스텀 행높이를 지우지 않는다(openpyxl 동작) —
+        # 지우지 않으면 제목행에 걸었던 행높이(162pt 등)가 폴백 헤더(1행)에 그대로 남는다
+        for dim in ws.row_dimensions.values():
+            dim.height = None
         for c, name in enumerate(out_headers, start=1):
             ws.cell(row=1, column=c, value=name)
         return 2
@@ -269,25 +273,38 @@ def _has_datetime(ws, col: int, first_row: int, last_row: int) -> bool:
 
 
 def _fit_width(ws, col: int, header_row: int, last_row: int) -> float:
+    header_text = str(ws.cell(row=header_row, column=col).value or "")
     longest = 0
     for r in range(header_row, min(last_row, header_row + _FIT_SCAN_ROWS) + 1):
         value = ws.cell(row=r, column=col).value
-        if value is not None:
-            longest = max(longest, len(str(value)))
+        if value is None:
+            continue
+        text = str(value)
+        if text.startswith("="):
+            # 수식은 화면에 보이는 값이 아니다(예: 종합요약의 SUMIF) — 그 텍스트로
+            # 재면 컬럼이 60자 상한에 바로 닿는다. 대신 헤더 길이로 잰다
+            text = header_text
+        longest = max(longest, len(text))
     return max(MIN_WIDTH, min(MAX_WIDTH, longest * _WIDTH_PER_CHAR + 2))
 
 
 def close_sheet(ws, tpl: FormatTemplate, out_headers: list, first_data_row: int,
-                last_row: int, row_heights: dict | None = None) -> None:
+                last_row: int) -> None:
     """헤더·데이터 서식, 열너비, 숫자서식, 틀고정·필터·인쇄설정을 마무리한다.
 
     자동필터 범위와 인쇄영역은 원본 값을 쓰지 않고 **결과 행수로 재계산**한다.
     회신본마다 데이터 행수가 달라 원본 값(A4:H63 등)은 결과와 무관하기 때문이다.
 
+    헤더 행은 `tpl.header_row`가 아니라 `first_data_row - 1`로 잡는다.
+    `open_sheet`가 예외로 폴백하면 실제 헤더는 1행에 쓰이는데 `tpl.header_row`는
+    원본 값(예: 4)을 그대로 갖고 있다 — 그 값을 믿으면 스타일링·틀고정·자동필터가
+    데이터 행을 헤더로 착각한다. 호출자는 모두 `open_sheet`가 돌려준 값을 그대로
+    `first_data_row`로 넘기므로 이 역산이 성립한다.
+
     스타일 적용과 필터/인쇄영역 재계산을 별도 try로 나눈다 — 필터·인쇄영역
     재계산은 장식이 아니라 결함 수정이라, 서식 적용이 실패해도 반드시 돈다.
     """
-    header_row = tpl.header_row
+    header_row = first_data_row - 1
     last_row = max(last_row, header_row)
 
     try:
@@ -328,12 +345,6 @@ def close_sheet(ws, tpl: FormatTemplate, out_headers: list, first_data_row: int,
             ws.sheet_properties.pageSetUpPr.fitToPage = True
             ws.page_setup.fitToWidth = 1
             ws.page_setup.fitToHeight = 0
-
-        # 사진을 옮겨 붙인 행만 원본 높이를 따른다. 나머지까지 원본 높이(85.5 등)를
-        # 쓰면 사진 없는 표가 화면을 넘긴다
-        for row, height in (row_heights or {}).items():
-            if height:
-                ws.row_dimensions[row].height = height
     except Exception:
         pass
 

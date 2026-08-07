@@ -407,6 +407,7 @@ AI 검증 없이 빠르게 검토
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const templateNoteDefault = $('template-note').textContent;   // 양식 선택 해제 시 되돌릴 안내문
 
   // ── 공통 ────────────────────────────────────────────────────
   async function api(path, opts) {
@@ -534,6 +535,11 @@ AI 검증 없이 빠르게 검토
       const res = await runJob(`/api/session/${state.sid}/files`, { method: 'POST', body: fd },
                                '파일을 읽는 중…');
       state.files = res.files;
+      // 업로드한 파일셋이 바뀌면 이전에 고른 양식이 이 파일들에도 맞는 서식이라고
+      // 보장할 수 없다 — 다시 고르게 한다(안 고르면 규칙 2 다수결로 내려간다)
+      state.templateId = null;
+      $('template-pick').value = '';
+      $('template-note').textContent = templateNoteDefault;
       renderFiles();
     } catch (e) {
       showError(e.message);

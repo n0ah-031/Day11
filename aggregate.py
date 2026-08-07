@@ -1477,7 +1477,10 @@ def main(argv=None) -> int:
     wb.save(args.out)
     write_report(files, Path(args.report), overview=run)
 
-    print(f"\n결과: {args.out} (시트 {len(wb.sheetnames)}개)")
+    # 개요는 데이터 시트가 아니라 안내다. 세면 '결과 시트 N개'가 틀린 값이 된다
+    # (server.py의 같은 계산과 이유가 같다)
+    data_sheets = [s for s in wb.sheetnames if s != xf.OVERVIEW_SHEET]
+    print(f"\n결과: {args.out} (시트 {len(data_sheets)}개)")
     print(f"오류 리포트: {args.report}")
     if forced:
         # §10.1 특이사항 안내 — 다운로드를 막지 않는다
