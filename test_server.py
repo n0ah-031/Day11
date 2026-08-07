@@ -523,6 +523,38 @@ def test_result_has_format():
     print("  ✓ 결과·리포트에 서식과 취합 개요")
 
 
+def test_template_lookup_failure_falls_back():
+    """규칙 1 조회(존재하지 않는 id·Supabase 장애 등)가 터져도 규칙 2로 내려가 취합이 죽지 않는다.
+
+    이 테스트 환경은 Supabase가 없어 `_form_store_ready`가 항상 거짓이라 규칙 1 분기 자체를
+    타지 않는다 — 그래서 여기서만 `_form_store_ready`와 `store.get_form_template`을
+    직접 갈아끼워 "조회가 try 밖에서 예외를 던지면 aggregate()가 500으로 죽는다"는 결함을
+    재현한다. `test_clock_skew_tolerance`와 같은 패턴으로 finally에서 반드시 되돌린다.
+    """
+    sid = new_session()
+    wait(upload(sid, [("기획부.xlsx", book_bytes(CLEAN))]))
+    wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True}))
+
+    real_ready = server._form_store_ready
+    real_get_template = server.store.get_form_template
+
+    def boom(_template_id):
+        raise RuntimeError("모의 Supabase 장애(store._rest가 던지는 것과 같은 종류)")
+
+    server._form_store_ready = lambda user: True
+    server.store.get_form_template = boom
+    try:
+        body = wait(client.post(f"/api/session/{sid}/aggregate",
+                                json={"mode": "B", "included": [0], "group_map": {},
+                                      "summary_cols": [], "template_id": "no-such-id"}))
+    finally:
+        server._form_store_ready = real_ready
+        server.store.get_form_template = real_get_template
+    assert body["result_sheets"] == ["예산"], body["result_sheets"]   # 취합이 정상 완료됐다
+    assert body["format_source"], body   # 규칙 2(다수결/단일파일 캡처)로 내려가 서식이 비지 않았다
+    print("  ✓ 규칙 1 조회 실패해도 규칙 2로 내려가 취합이 산다")
+
+
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
     for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
@@ -530,7 +562,8 @@ def main() -> int:
                test_job_progress,
                test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,
                test_form_requires_store, test_pivot_sheets,
-               test_clock_skew_tolerance, test_result_has_format):
+               test_clock_skew_tolerance, test_result_has_format,
+               test_template_lookup_failure_falls_back):
         fn()
     print("\n전체 통과")
     return 0

@@ -569,20 +569,25 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
     mode = body.get("mode", "B")
 
     # 규칙 1: 등록 양식을 골랐으면 그 양식이 서식 원천이고 다수결을 타지 않는다.
-    # 못 받으면 규칙 2(전 파일 다수결)로 내려간다 — 서식 실패가 취합을 막으면 안 된다
+    # 조회·소유자 확인·다운로드 어느 단계에서 터져도(없는 id·잘못된 형식·Supabase 장애 등
+    # store._rest가 던지는 RuntimeError 포함) 규칙 2(전 파일 다수결)로 내려간다 —
+    # 서식 실패가 취합 자체를 막으면 안 된다. 그래서 조회부터 다운로드까지 한 try에 묶는다
     template_path = None
     template_id = body.get("template_id")
     if template_id and _form_store_ready(user):
-        row = store.get_form_template(template_id)
-        if row and row.get("file_url") and \
-                store.owner_of_project(row["project_id"]) == user["id"]:
-            try:
-                template_path = session["dir"] / "_template.xlsx"
+        try:
+            row = store.get_form_template(template_id)
+            if row and row.get("file_url") and \
+                    store.owner_of_project(row["project_id"]) == user["id"]:
+                # 업로드 파일은 session["dir"] 바로 아래 사용자가 지정한 이름으로 저장되므로
+                # (예: "_template.xlsx"를 업로드하면 겹친다) 전용 하위 폴더에 둬 절대 안 겹치게 한다
+                template_dir = session["dir"] / "_template"
+                template_dir.mkdir(exist_ok=True)
+                template_path = template_dir / "template.xlsx"
                 template_path.write_bytes(
                     store.get_object(store.RESULT_BUCKET, row["file_url"]))
-            except Exception:
-                # 양식을 못 받으면 규칙 2(전 파일 다수결)로 내려간다. 취합은 막지 않는다
-                template_path = None
+        except Exception:
+            template_path = None
 
     job_id = None
     if session["project_id"]:
