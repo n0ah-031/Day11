@@ -16,7 +16,7 @@ BRANCH="${BRANCH:-claude/handoff-work-progress-f416b0}"
 DIR="${DIR:-$HOME/Day11}"
 DOMAIN="${1:-}"
 
-echo "==> 1/5 방화벽 (VM 안쪽)"
+echo "==> 1/6 방화벽 (VM 안쪽)"
 # Oracle의 Ubuntu 이미지는 기본 iptables 규칙이 80·443을 막는다. ufw를 쓰는 이미지도 있어
 # 둘 다 처리한다. 이미 열려 있으면 그냥 지나간다.
 if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -34,20 +34,35 @@ else
   sudo netfilter-persistent save
 fi
 
-echo "==> 2/5 도커"
+echo "==> 2/6 스왑 (메모리가 작은 VM 대비)"
+# E2.1.Micro는 1GB뿐이라 도커 빌드 중 OOM으로 죽는다. 2GB 미만이면 스왑을 만들어 둔다.
+# A1(6GB 이상)이면 이 단계는 건너뛴다.
+MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
+if [ "${MEM_MB:-9999}" -lt 2048 ] && [ ! -f /swapfile ]; then
+  echo "  메모리 ${MEM_MB}MB → 스왑 2GB 생성"
+  sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile >/dev/null
+  sudo swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+else
+  echo "  메모리 ${MEM_MB}MB → 스왑 불필요"
+fi
+
+echo "==> 3/6 도커"
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 git
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER" || true      # 다음 로그인부터 sudo 없이 docker를 쓴다
 
-echo "==> 3/5 코드"
+echo "==> 4/6 코드"
 if [ -d "$DIR/.git" ]; then
   git -C "$DIR" fetch --all --quiet && git -C "$DIR" checkout "$BRANCH" --quiet && git -C "$DIR" pull --quiet
 else
   git clone --branch "$BRANCH" "$REPO" "$DIR"
 fi
 
-echo "==> 4/5 키 확인"
+echo "==> 5/6 키 확인"
 if [ ! -f "$DIR/.env" ]; then
   cat >&2 <<EOF
 
@@ -62,7 +77,7 @@ EOF
   exit 1
 fi
 
-echo "==> 5/5 기동"
+echo "==> 6/6 기동"
 cd "$DIR"
 if [ -n "$DOMAIN" ]; then
   # 도메인이 있으면 Caddy가 Let's Encrypt 인증서를 자동으로 받는다 → 쿠키에 Secure를 붙인다
