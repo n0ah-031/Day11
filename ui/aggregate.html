@@ -398,6 +398,7 @@ AI 검증 없이 빠르게 검토
     deptNames: {},      // fid → 부서명. 비우면 파일명을 쓴다
     review: null,       // 2단계 응답
     included: new Set(),
+    templateId: null,   // 작성기준을 가져온 등록 양식 id — 취합 요청에 실어 규칙 1을 태운다
     mode: 'A',
     groupMap: {},
     summaryCols: new Set(),
@@ -691,6 +692,7 @@ AI 검증 없이 빠르게 검토
   $('template-pick').addEventListener('change', async () => {
     const id = $('template-pick').value;
     const note = $('template-note');
+    state.templateId = id || null;   // 취합 요청에 실어 보낼 id — 규칙 1은 서버가 판단한다
     if (!id) { note.textContent = '작성기준을 쓰지 않습니다. 아래에서 직접 고르세요.'; return; }
     const heads = new Set(state.files.flatMap((f) => (f.sheets || []).flatMap((s) => s.headers || []))
                                      .filter(Boolean));
@@ -865,7 +867,8 @@ AI 검증 없이 빠르게 검토
           included: [...state.included],
           group_map: state.mode === 'C' ? state.groupMap : {},
           summary_cols: state.mode === 'D' ? [...state.summaryCols] : [],
-          dept_names: state.deptNames
+          dept_names: state.deptNames,
+          template_id: state.templateId
         })
       }, '취합하는 중…');
       renderResult();

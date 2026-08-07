@@ -567,6 +567,23 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
         raise HTTPException(400, "취합 가능한 파일이 없습니다.")
 
     mode = body.get("mode", "B")
+
+    # 규칙 1: 등록 양식을 골랐으면 그 양식이 서식 원천이고 다수결을 타지 않는다.
+    # 못 받으면 규칙 2(전 파일 다수결)로 내려간다 — 서식 실패가 취합을 막으면 안 된다
+    template_path = None
+    template_id = body.get("template_id")
+    if template_id and _form_store_ready(user):
+        row = store.get_form_template(template_id)
+        if row and row.get("file_url") and \
+                store.owner_of_project(row["project_id"]) == user["id"]:
+            try:
+                template_path = session["dir"] / "_template.xlsx"
+                template_path.write_bytes(
+                    store.get_object(store.RESULT_BUCKET, row["file_url"]))
+            except Exception:
+                # 양식을 못 받으면 규칙 2(전 파일 다수결)로 내려간다. 취합은 막지 않는다
+                template_path = None
+
     job_id = None
     if session["project_id"]:
         job_id = store.create_job(session["project_id"], mode,
@@ -592,7 +609,7 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
             wb, notes, run = ag.synthesize(selected, mode,
                                            body.get("group_map") or {},
                                            body.get("summary_cols") or [],
-                                           all_files=files)
+                                           all_files=files, template_path=template_path)
 
             # 리포트는 합성 뒤에 쓴다 — 결과 행수와 기준 서식을 개요에 실어야 한다.
             # issues/fixes는 review_stage1이 확정하고 preprocess·synthesize가 건드리지

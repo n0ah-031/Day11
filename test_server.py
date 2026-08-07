@@ -478,6 +478,51 @@ def test_clock_skew_tolerance():
     print("  ✓ 시계 오차 허용(방금 발급된 토큰 통과 / 한참 미래 토큰은 거부)")
 
 
+def test_result_has_format():
+    """다운로드한 결과·리포트에 서식과 취합 개요가 들어 있다."""
+    sid = new_session()
+    wait(upload(sid, [("기획부.xlsx", book_bytes(CLEAN)),
+                      ("총무부.xlsx", book_bytes(BROKEN))]))
+    wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True}))
+    body = wait(client.post(f"/api/session/{sid}/aggregate",
+                            json={"mode": "B", "included": [0],
+                                  "group_map": {}, "summary_cols": []}))
+    # 개요는 데이터 시트가 아니므로 결과 시트 수에 세지 않는다
+    assert body["result_sheets"] == ["예산"], body["result_sheets"]
+    assert body["metrics"]["sheets"] == 1, body["metrics"]
+    assert body["format_source"], body
+
+    res = client.get(f"/api/session/{sid}/download/result")
+    assert res.status_code == 200
+    wb = openpyxl.load_workbook(io.BytesIO(res.content))
+    assert wb.sheetnames == ["취합 개요", "예산"], wb.sheetnames
+
+    ws = wb["예산"]
+    assert ws["A1"].value == "실적 보고"                 # 제목 블록이 살아 있다
+    assert ws.cell(row=3, column=1).value == "부서"      # 헤더는 원본 자리(3행)
+    assert ws.cell(row=3, column=2).value == "사번"
+    # 부서 컬럼값은 파일명이 아니라 확장자를 뗀 파일명(§9)이다
+    assert ws.cell(row=4, column=1).value == "기획부"
+    # book_bytes()의 헤더 행은 굵게 꾸미지 않았다 — 규칙 1·2는 원본 서식을 그대로
+    # 옮기는 것이지 강조를 지어내지 않는다(강조는 basic() 폴백에서만 나온다)
+    assert ws.cell(row=3, column=1).font.bold is False
+    assert ws.freeze_panes == "A4"
+    assert ws.auto_filter.ref == "A3:D5"
+    assert ws.column_dimensions["A"].width                # 열너비가 지정돼 있다
+
+    # 제출 2 · 취합 1 · 제외 1이 결과 파일 안에 적혀 있다
+    ov = wb["취합 개요"]
+    assert "제출 2" in ov["A4"].value and "제외 1" in ov["A4"].value
+    names = [ov.cell(row=r, column=2).value for r in range(7, 9)]
+    assert "총무부.xlsx" in names, names
+
+    rep = openpyxl.load_workbook(
+        io.BytesIO(client.get(f"/api/session/{sid}/download/report").content))
+    assert rep.sheetnames == ["취합 개요", "오류 목록", "자동교정 이력"], rep.sheetnames
+    assert rep["오류 목록"].cell(row=1, column=1).font.bold is True
+    print("  ✓ 결과·리포트에 서식과 취합 개요")
+
+
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
     for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
@@ -485,7 +530,7 @@ def main() -> int:
                test_job_progress,
                test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,
                test_form_requires_store, test_pivot_sheets,
-               test_clock_skew_tolerance):
+               test_clock_skew_tolerance, test_result_has_format):
         fn()
     print("\n전체 통과")
     return 0
