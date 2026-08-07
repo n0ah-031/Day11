@@ -96,6 +96,15 @@ git pull && sudo docker compose up -d --build   # 갱신(진행 중 세션은 �
 python3 manage_users.py promote <사번>
 ```
 
+## 현재 운영 중인 배포
+
+| 항목 | 값 |
+|---|---|
+| 주소 | **https://140-245-93-179.sslip.io/login.html** |
+| 서버 | Oracle Cloud Always Free · 도쿄 · Ubuntu 24.04 · VM.Standard.E2.1.Micro(1/8 OCPU·954MB) + 스왑 2GB |
+| TLS | Let's Encrypt(자동 갱신) · HTTP는 308로 HTTPS 전환 · `COOKIE_SECURE=1` |
+| 도메인 | `sslip.io` — IP를 그대로 도메인으로 만들어 주는 무료 서비스. **따로 사지 않았습니다.** 회사 도메인이 준비되면 A 레코드를 이 IP로 걸고 `bash setup-vm.sh <도메인>` 한 번이면 전환됩니다 |
+
 ## 도메인과 HTTPS
 
 - **도메인이 있으면** `SITE_ADDRESS`에 도메인을 넣고 A 레코드를 VM IP로 걸어두면 Caddy가
