@@ -1,66 +1,89 @@
-# 배포 (Fly.io)
+# 배포
 
-컨테이너 이미지와 설정은 저장소에 있습니다(`Dockerfile`·`fly.toml`·`.dockerignore`).
-**실제 배포는 계정이 필요해 사람이 실행합니다.** 아래 순서대로 하면 됩니다.
+컨테이너 이미지는 `Dockerfile` 하나로 어디든 올라갑니다. **선택한 곳은 Google Cloud Run**이고
+배포 스크립트는 [`deploy-cloudrun.sh`](deploy-cloudrun.sh)입니다. Fly.io 설정(`fly.toml`)도
+대안으로 남겨 뒀습니다.
 
-## 왜 Fly.io인가
+## 이 앱이 호스팅에 거는 조건
 
-- **Supabase가 서울(ap-northeast-2)**입니다. 요청 한 번에 Supabase REST를 여러 번 오가므로
-  (인증 확인 → 기록 → Storage) 가까운 리전이 그대로 체감됩니다. Fly의 도쿄(`nrt`)가 가장 가깝습니다.
-- **세션·잡이 프로세스 메모리**라 인스턴스가 하나여야 하고 잠들면 안 됩니다. Fly는 이걸 설정으로
-  못 박을 수 있습니다(`min_machines_running = 1`, `max_machines_running = 1`, `auto_stop_machines = false`).
-- Vercel 같은 서버리스는 맞지 않습니다 — 요청마다 인스턴스가 갈리면 업로드 세션을 잃고,
-  2단계 AI 재검증(파일당 20초대)이 함수 실행 시간에 걸립니다.
+세 가지가 구조에서 나옵니다 — 취향이 아닙니다.
 
-Railway·Render도 같은 Dockerfile로 됩니다. 다만 리전 선택이 좁고(미국 위주) 무료 등급이
-잠들 수 있어, 그 두 성질이 이 앱과 맞지 않습니다.
+| 조건 | 왜 | 안 지키면 |
+|---|---|---|
+| **인스턴스 1개** | 업로드 세션·잡 진행률이 프로세스 메모리(dict + 임시 폴더)에 있다 | 요청이 다른 인스턴스로 가면서 "세션을 찾을 수 없습니다" |
+| **응답 후에도 CPU 할당** | 긴 작업을 백그라운드 스레드로 돌리고 요청에는 즉시 `job_id`만 준다(`server._start_job`) | 취합이 진행되지 않거나 폴링 사이에만 찔끔 돈다 |
+| **요청 타임아웃 5분 이상** | 2단계 AI 재검증이 파일당 20초대다(30개 파일 실측 112초, HANDOFF §4) | 큰 취합이 잘린다 |
 
-## 배포 절차
+Vercel 같은 서버리스가 맞지 않는 이유가 이 표입니다.
 
-```bash
-brew install flyctl        # 이 머신에는 아직 없습니다
-fly auth login             # 브라우저로 로그인
-fly launch --no-deploy --copy-config    # fly.toml을 그대로 씁니다(앱 이름만 정하면 됩니다)
-```
-
-비밀값은 `fly.toml`에 넣지 않고 secret으로 넣습니다(`.env`는 커밋되지 않습니다).
+## Cloud Run 배포
 
 ```bash
-fly secrets set \
-  OPENAI_API_KEY="$(grep '^OPENAI_API_KEY=' .env | cut -d= -f2-)" \
-  OPENAI_MODEL="$(grep '^OPENAI_MODEL=' .env | cut -d= -f2-)" \
-  SUPABASE_URL="$(grep '^SUPABASE_URL=' .env | cut -d= -f2-)" \
-  SUPABASE_PUBLISHABLE_KEY="$(grep '^SUPABASE_PUBLISHABLE_KEY=' .env | cut -d= -f2-)" \
-  SUPABASE_SERVICE_ROLE_KEY="$(grep '^SUPABASE_SERVICE_ROLE_KEY=' .env | cut -d= -f2-)"
+# 1. 준비 (한 번만)
+brew install --cask google-cloud-sdk     # 이 머신에는 아직 없습니다
+gcloud auth login
+gcloud config set project <프로젝트ID>    # 결제 계정이 연결돼 있어야 합니다
 
-fly deploy
-fly open /login.html
+# 2. 배포
+./deploy-cloudrun.sh                      # 서비스명 기본값 chwihap
 ```
 
-## 배포 전에 반드시 확인할 것
+스크립트가 하는 일: 필요한 API 켜기 → `.env`의 키 4개를 **Secret Manager**에 넣기(환경변수로
+넣으면 콘솔에서 그대로 보입니다) → 런타임 서비스 계정에 읽기 권한 주기 → `--source .`로
+빌드·배포. 끝나면 URL을 찍습니다.
+
+핵심 플래그와 이유는 스크립트 머리말에 적어 뒀습니다. **`--no-cpu-throttling`을 빼면 안
+됩니다** — Cloud Run 기본값은 응답을 보낸 뒤 CPU를 조여서 취합 스레드가 멈춥니다.
+
+## 잠드는 것에 대해
+
+`--min-instances 0`이라 **마지막 요청 뒤 15분이 지나면 인스턴스가 내려갑니다.** 다음 사용자가
+들어오면 다시 뜹니다(몇 초).
+
+| 잠들면 | |
+|---|---|
+| 사라짐 | 올려둔 파일(임시 폴더), 진행 중이던 취합, 진행률. 브라우저의 세션 ID는 404가 됩니다 |
+| 남음 | **로그인 상태**(JWT 쿠키를 서버 상태 없이 검증), 취합 결과·오류 리포트·이력·양식·감사 로그(전부 Supabase) |
+
+즉 **쓰다 만 작업만 잃고 끝낸 것은 잃지 않습니다.** 취합이 도는 동안에는 브라우저가 진행률을
+폴링하므로 잠들지 않습니다. 위험한 경우는 취합을 걸어놓고 탭을 닫는 것입니다.
+
+항상 켜두려면 `--min-instances 1`로 바꾸면 됩니다. 그만큼 계속 과금됩니다.
+
+## 비용
+
+Cloud Run 무료 범위는 월 **180,000 vCPU-초 · 360,000 GiB-초 · 200만 요청**입니다(Tier 1 리전
+기준 — 그래서 서울(Tier 2)이 아니라 도쿄를 씁니다). 다만 `--no-cpu-throttling`은
+**인스턴스가 살아 있는 내내** vCPU-초를 씁니다(요청 처리 중만이 아니라). 유휴 15분도
+포함되므로, 하루 몇 번 쓰는 데모라면 무료 범위 안이지만 **상시 트래픽이 있으면 넘어갑니다.**
+무료 범위가 인스턴스 기반 과금에도 그대로 적용되는지는 공식 문서에서 명시적으로 확인하지
+못했으니, 배포 후 첫 달 청구서를 한 번 확인하세요.
+
+## 배포 전 확인
 
 | 항목 | 왜 |
 |---|---|
-| `AUTH_DISABLED`를 **넣지 않는다** | 이 값이 켜지면 인증이 통째로 없어집니다. 키가 없으면 열리는 게 아니라 503으로 닫히도록 되어 있으니(fail-closed) 그냥 두면 됩니다 |
-| `COOKIE_SECURE=1` | `fly.toml`에 이미 있습니다. 없으면 HTTPS에서도 쿠키에 Secure가 붙지 않습니다 |
-| 머신 1대 유지 | 늘리면 세션을 잃습니다. `fly scale count 1`을 넘기지 마세요 |
-| 첫 관리자 지정 | 배포 후 `/login.html`에서 가입하고, 로컬에서 `python3 manage_users.py promote <사번>`으로 올립니다(Admin 화면은 관리자만 들어갑니다) |
+| `AUTH_DISABLED`를 **넣지 않는다** | 켜지면 인증이 통째로 사라집니다. 키가 없으면 열리는 게 아니라 503으로 닫히므로(fail-closed) 그냥 두면 됩니다 |
+| `COOKIE_SECURE=1` | 스크립트가 넣습니다. 없으면 HTTPS에서도 쿠키에 Secure가 안 붙습니다 |
+| 인스턴스 1개 유지 | `--max-instances 1`을 늘리지 마세요 |
+| 첫 관리자 | 배포 후 `/login.html`에서 가입하고 로컬에서 `python3 manage_users.py promote <사번>` |
+| Supabase 무료 플랜 | 오래 안 쓰면 프로젝트가 일시정지됩니다. 발표 전에 한 번 접속해 깨워두세요 |
 
-## 확인한 것 (로컬 도커)
+## 로컬 도커로 확인한 것
 
-배포 전에 같은 이미지를 로컬에서 띄워 확인했습니다.
+배포 설정만 만들고 "됐다"고 하지 않기 위해, 같은 이미지를 로컬에서 띄워 확인했습니다.
 
-- 빌드 성공, 이미지 741MB(가장 큰 것은 cryptography 12MB·pillow 18MB·openai 5.7MB)
+- 빌드 성공(741MB — cryptography 12MB·pillow 18MB·openai 5.7MB가 큽니다)
 - 화면 7개 전부 200, 로그인 없이 `POST /api/session`은 401(인증 게이트 동작)
-- 컨테이너 안에서 **실제 Supabase를 상대로 전 구간**: 가입 → 로그인 → 업로드 2개 →
-  검토(정상 2건) → 모드 B 취합(2파일·1시트) → 결과 다운로드(4행) → 이력 1건
+- 컨테이너 안에서 **실제 Supabase 상대로 전 구간**: 가입 → 로그인 → 업로드 2개 →
+  검토(정상 2건) → 모드 B 취합 → 결과 다운로드(4행) → 이력 1건
 
-## 알아둘 한계
+실제 Cloud Run 배포는 계정·결제가 필요해 실행하지 않았습니다.
 
-- **재시작하면 진행 중이던 작업이 사라집니다.** 기록과 산출물은 Supabase에 남지만, 업로드
-  세션과 잡 진행률은 프로세스 메모리입니다. 배포(=재시작) 중에 취합을 돌리던 사용자는 다시
-  올려야 합니다.
-- **인스턴스를 늘리려면 세션·잡을 밖으로 빼야 합니다**(DB나 Redis). 그 전까지는 머신 1대가
-  이 앱의 구조적 상한입니다.
-- 업로드 상한은 파일당 50MB·합계 500MB이고 Admin 화면에서 바꿉니다. 큰 업로드를 자주 쓰면
-  머신 메모리(현재 1GB)를 함께 올리세요 — 30개 파일 취합 실측에서 최대 RSS 378MB였습니다.
+## 대안 (같은 Dockerfile을 씁니다)
+
+| | 비용 | 잠듦 | 비고 |
+|---|---|---|---|
+| **Fly.io** (`fly.toml` 있음) | 월 약 $5.92 | 안 잠듦 | 도쿄. `fly deploy` 한 줄. CPU 조임 문제가 없습니다 |
+| **Render** | 무료 | 15분 유휴 | 512MB(30개 취합 실측 최대 RSS 378MB라 빠듯), 리전이 멉니다 |
+| **Oracle Cloud Always Free** | 무료 | 안 잠듦 | 서울 리전. VM을 직접 관리해야 합니다(도커·TLS·재시작) |
