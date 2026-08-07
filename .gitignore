@@ -5,3 +5,8 @@ sampledata/
 __pycache__/
 node_modules/
 dist/
+
+# 접속 키·인증서 — 배포 VM 개인키가 저장소 루트에 놓이는 일이 있었다
+*.key
+*.pem
+ssh-key-*
