@@ -80,6 +80,10 @@ scp -i <키> .env ubuntu@<VM_IP>:~/Day11/.env    # 로컬에서
 
 `restart: unless-stopped`라 VM을 재부팅해도 자동으로 다시 뜹니다.
 
+> **재기동할 때 환경변수를 빼먹지 마세요.** `setup-vm.sh`가 `SITE_ADDRESS`·`COOKIE_SECURE`를
+> `.env`에 적어 두므로 `docker compose up -d`만 쳐도 유지됩니다. 다만 `.env`를 새로 만들거나
+> 덮어썼다면 다시 적어야 합니다 — 없으면 **조용히 HTTP(:80)로 떨어집니다**(실제로 겪었습니다).
+
 확인·운영:
 
 ```bash

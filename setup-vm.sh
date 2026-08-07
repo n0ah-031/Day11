@@ -79,6 +79,15 @@ fi
 
 echo "==> 6/6 기동"
 cd "$DIR"
+# 배포 주소를 .env에 적어 둔다. compose는 프로젝트 폴더의 .env를 변수 치환에 쓰므로,
+# 이후에 누가 `docker compose up -d`만 쳐도 설정이 유지된다.
+# **이걸 안 하면 환경변수를 빼먹은 재기동에서 조용히 :80(HTTP)으로 떨어진다** — 실제로 그랬다.
+sed -i '/^SITE_ADDRESS=/d;/^COOKIE_SECURE=/d' .env
+if [ -n "$DOMAIN" ]; then
+  printf '\nSITE_ADDRESS=%s\nCOOKIE_SECURE=1\n' "$DOMAIN" >> .env
+else
+  printf '\nSITE_ADDRESS=:80\nCOOKIE_SECURE=0\n' >> .env
+fi
 if [ -n "$DOMAIN" ]; then
   # 도메인이 있으면 Caddy가 Let's Encrypt 인증서를 자동으로 받는다 → 쿠키에 Secure를 붙인다
   sudo SITE_ADDRESS="$DOMAIN" COOKIE_SECURE=1 docker compose up -d --build
