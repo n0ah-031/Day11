@@ -13,14 +13,18 @@ VM 한 대에 도커로 올립니다. 구성은 `docker-compose.yml`(앱 + Caddy
 | **요청이 오래 걸려도 안 끊길 것** | 2단계 AI 재검증이 파일당 20초대(30개 파일 실측 112초, HANDOFF §4) | 큰 취합이 잘린다 |
 
 VM은 이 셋을 그냥 만족합니다. 서버리스에서 설정으로 우회해야 했던 것들이 문제가 되지 않고,
-**서울 리전(ap-seoul-1)**이라 Supabase(서울)와 같은 도시이며, 잠들지 않고, 무료입니다.
+잠들지 않고, 무료입니다.
 
 ## 1. VM 만들기
 
-> **가입할 때 홈 리전을 서울로 고르세요.** Always Free 자원은 **홈 리전에서만** 무료이고,
-> 홈 리전은 가입 시 정해집니다(나중에 바꾸기 어렵습니다). 다른 리전에 만들면 그냥 과금됩니다.
-> 이미 다른 홈 리전으로 가입하셨다면 그 리전에 만드세요 — Supabase(서울)와 멀어져 느려지지만
-> 동작은 합니다.
+> **Always Free는 홈 리전에서만 무료입니다.** 홈 리전은 가입할 때 정해집니다. 인스턴스를
+> 만들 때 콘솔 좌측 상단 리전이 가입 때 고른 그 리전인지 반드시 확인하세요 — 다른 리전에
+> 만들면 그냥 과금됩니다.
+>
+> 가입 목록에 한국(서울)이 없는 경우가 있습니다(오라클도 "원하는 리전이 없으면 인접 리전을
+> 고르라"고 안내합니다). 그때는 **도쿄 → 오사카 → 싱가포르** 순으로 가까운 곳을 고르세요.
+> Supabase가 서울이라 왕복이 30~40ms 늘지만, 이 앱의 무거운 작업은 CPU와 AI 호출이라
+> (30개 파일 기준 엑셀 6.7초·AI 112초) 비율로는 미미합니다.
 
 Oracle Cloud 콘솔 → Compute → Instances → Create instance
 
@@ -41,49 +45,39 @@ Always Free 한도는 A1이 **전체 2 OCPU · 12GB**, 블록 스토리지 합�
 > 파일 취합 실측 최대 RSS 378MB) 엑셀 파싱이 CPU를 쓰는 작업이라 체감이 느립니다. A1이 날
 > 때까지 기다렸다 쓰는 편을 권합니다.
 
-## 2. 포트 열기 — **두 군데를 다 열어야 합니다**
+## 2. 콘솔에서 포트 열기
 
-Oracle에서 가장 많이 걸리는 지점입니다. VCN 보안 목록만 열고 끝내면 접속이 안 됩니다.
+**VCN → Security List → Ingress Rules**에 `0.0.0.0/0` TCP **80·443**을 추가합니다.
+VM 안쪽 방화벽은 아래 스크립트가 엽니다 — **두 군데를 다 열어야** 접속이 됩니다(오라클에서
+가장 많이 걸리는 지점입니다).
+
+## 3. 한 번에 배포
+
+VM에 접속해 스크립트를 받아 실행합니다. 방화벽(안쪽)·도커 설치·코드 내려받기·기동을 다 합니다.
 
 ```bash
-# (A) 콘솔: VCN → Security List → Ingress Rules 에 0.0.0.0/0 TCP 80, 443 추가
+ssh -i <키> ubuntu@<VM_IP>
 
-# (B) VM 안의 방화벽. Ubuntu 이미지는 기본 iptables 규칙이 막고 있습니다
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
-sudo netfilter-persistent save
+curl -fsSL https://raw.githubusercontent.com/n0ah-031/Day11/claude/handoff-work-progress-f416b0/setup-vm.sh -o setup-vm.sh
+bash setup-vm.sh                       # HTTP (도메인 없을 때)
+# bash setup-vm.sh chwihap.example.com # 도메인이 있으면 자동 HTTPS
 ```
 
-## 3. 도커 설치
+처음 실행하면 `.env`가 없다고 멈춥니다(키는 저장소에 없습니다 — 그게 맞습니다).
+안내대로 로컬에서 복사한 뒤 다시 실행하세요:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 git
-sudo usermod -aG docker $USER && newgrp docker
-```
-
-## 4. 앱 올리기
-
-```bash
-git clone https://github.com/n0ah-031/Day11.git && cd Day11
-git checkout claude/handoff-work-progress-f416b0
-
-# 키는 저장소에 없습니다. 로컬 .env를 복사해 오세요(내용은 HANDOFF §0.3)
-scp .env ubuntu@<VM_IP>:~/Day11/.env      # 로컬에서 실행
-
-# 도메인이 있으면 (자동 HTTPS)
-SITE_ADDRESS=chwihap.example.com docker compose up -d --build
-
-# 도메인이 없으면 (HTTP만) — 쿠키 Secure를 꺼야 로그인이 됩니다
-SITE_ADDRESS=:80 COOKIE_SECURE=0 docker compose up -d --build
+scp -i <키> .env ubuntu@<VM_IP>:~/Day11/.env    # 로컬에서
 ```
 
 `restart: unless-stopped`라 VM을 재부팅해도 자동으로 다시 뜹니다.
 
-확인:
+확인·운영:
 
 ```bash
-docker compose ps          # app·caddy 둘 다 Up
-curl -I http://<VM_IP>/login.html
+sudo docker compose ps                 # app·caddy 둘 다 Up
+sudo docker compose logs -f app        # 로그
+git pull && sudo docker compose up -d --build   # 갱신(진행 중 세션은 사라집니다)
 ```
 
 ## 5. 첫 관리자
@@ -107,6 +101,10 @@ python3 manage_users.py promote <사번>
 배포 설정만 만들고 "됐다"고 하지 않기 위해, 같은 구성을 로컬에서 띄워 확인했습니다.
 
 - `docker compose up` → app·caddy 기동, 화면 3개 200
+- `setup-vm.sh`: 문법 검사, `.env` 없을 때 안내하고 멈추는 동작, 그리고 설치할 패키지
+  (`docker.io`·`docker-compose-v2`·`git`·`iptables-persistent`)가 **arm64 Ubuntu 24.04에
+  실제로 있는지** 확인했습니다. 다만 방화벽·systemd 단계는 컨테이너에서 재현할 수 없어
+  **실제 VM에서 처음 돌려보는 것은 남아 있습니다**
 - **Caddy를 통해** 로그인 없이 `POST /api/session` → 401(인증 게이트 동작)
 - **Caddy를 통해 실제 Supabase 상대로 전 구간**: 가입 → 로그인 → 업로드 → 검토(정상) →
   모드 B 취합 → 결과 다운로드(4,961바이트). 테스트 계정은 정리했습니다

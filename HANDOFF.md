@@ -234,6 +234,7 @@ python3 test_auth.py
 | [ui/create.html](ui/create.html) | AI 양식 생성 + **기존 양식 등록** (design.md 화면 3 · 인지 §8). 좌측 문답(첨부·분기 버튼) / 우측 사양 카드(신뢰도 배지) / 결과 미리보기 + 동의 모달. 모드에 따라 버튼 하나가 '양식 생성'과 '이대로 등록하기'로 바뀐다 |
 | [hwpx_merge.py](hwpx_merge.py) | F3 hwpx 병합 엔진 + CLI. `aggregate.py`와 독립(형식·문제 영역이 다르다). 표준 라이브러리만 씀 |
 | [Dockerfile](Dockerfile) · [requirements.txt](requirements.txt) | 컨테이너 이미지. **워커는 1개다** — 세션·잡이 프로세스 메모리라 늘리면 세션을 잃는다 |
+| [setup-vm.sh](setup-vm.sh) | VM에서 한 번 실행하면 방화벽(안쪽)·도커·코드·기동까지 끝난다. VCN 보안 목록(콘솔)은 못 연다 |
 | [docker-compose.yml](docker-compose.yml) · [Caddyfile](Caddyfile) | 배포 구성(앱 + Caddy 리버스 프록시·자동 HTTPS). **복제하지 않는다** — 세션이 메모리에 있어 인스턴스 1개가 구조적 상한이다. 절차는 [DEPLOY.md](DEPLOY.md) |
 | [supabase/schema.sql](supabase/schema.sql) | 원격 스키마 전체 스냅샷. **새 환경은 이 파일 하나로 만든다** — 마이그레이션만으로는 서지 않는다(§4). 스키마를 바꾸면 다시 뽑는다 |
 | [bench_stage2.py](bench_stage2.py) | 2단계 AI 병렬화 실측(순차 대비 배수). **실제 키로 유료 호출이 일어난다** — `--dry`는 호출을 스텁으로 바꿔 호출 수만 센다. 수치는 §4 |
