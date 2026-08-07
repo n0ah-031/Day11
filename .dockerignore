@@ -1,0 +1,18 @@
+# 이미지에 들어가면 안 되는 것부터.
+.env
+.env.*
+sampledata/          # 실제 업무 파일. 커밋도 배포도 하지 않는다
+.git/
+.claude/
+
+# 이미지에 있어도 쓸모없는 것
+__pycache__/
+*.pyc
+test_*.py
+bench_stage2.py
+docs/
+supabase/
+HANDOFF.md
+*.md
+merged.xlsx
+error_report.xlsx
