@@ -1207,7 +1207,7 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
                 _add_images(ws, sheet, _row_offset(sheet, first))
                 xf.close_sheet(ws, tpl, sheet.headers, first, last)
                 total_rows += len(sheet.rows)
-        label = labels[0] if len(set(labels)) == 1 else f"파일별 원본 서식 {len(labels)}종"
+        label = labels[0] if len(set(labels)) == 1 else f"파일별 원본 서식 {len(set(labels))}종"
         notes.append(f"기준 서식: {label}")
         run = build_summary(all_files if all_files is not None else files, files,
                             mode, label, total_rows)
@@ -1256,6 +1256,7 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
                 notes.append(f"'{uf.dept}'의 '{sheet.name}' 시트 헤더가 기준과 달라 '{err_ws.title}' 시트로 분리했습니다.")
                 rows = [[uf.dept, sheet.name] + list(r) for r in sheet.rows]
                 _write_block(err_ws, [], rows, max(err_ws.max_row + 1, err_first))
+                total_rows += len(rows)   # 헤더불일치 시트로 빠진 행도 결과에 실제로 존재한다
                 continue
             prefix = [sheet.name, uf.dept] if mode == "C" else [uf.dept]
             rows = [prefix + list(r) for r in sheet.rows]
@@ -1294,8 +1295,10 @@ def _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes, header_
             terms = []
             for title, ranges in dept_rows.items():
                 target = wb[title]
-                # 제목 블록을 복원하면서 헤더가 1행이 아니게 됐다 — 시트마다 실제 헤더 행을 본다
-                hr = header_rows.get(title, 1)
+                # 제목 블록을 복원하면서 헤더가 1행이 아니게 됐다 — 시트마다 실제 헤더 행을 본다.
+                # dept_rows에 시트가 있으면 header_rows에도 반드시 있어야 한다(같은 루프에서
+                # 함께 채워진다) — 없으면 조용히 1행을 보는 대신 KeyError로 바로 드러낸다
+                hr = header_rows[title]
                 headers = [target.cell(row=hr, column=i).value
                            for i in range(1, target.max_column + 1)]
                 if col not in headers or dept not in ranges:

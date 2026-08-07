@@ -534,13 +534,15 @@ def test_pivot_flatten(tmp: Path):
     assert len(flat.headers) == 6, flat.headers                  # 3개월 × 2지표, 합계 행 제외
 
     # 시트명이 달랐던 두 파일이 모드 B에서 한 시트 2행으로 합쳐진다
-    wb, _notes, _run = ag.synthesize(files, "B", {}, [])
+    wb, _notes, run = ag.synthesize(files, "B", {}, [])
     assert wb.sheetnames == [xf.OVERVIEW_SHEET, ag.PIVOT_SHEET_NAME], wb.sheetnames
     ws = wb[ag.PIVOT_SHEET_NAME]
     assert ws.max_row == 3 and ws.max_column == 7, (ws.max_row, ws.max_column)
     assert [c.value for c in ws[1]][:3] == ["부서", "1월 신고", "1월 조치"]
     assert [ws.cell(row=r, column=1).value for r in (2, 3)] == ["강남지사", "판교지사"]
     assert [ws.cell(row=r, column=2).value for r in (2, 3)] == [1, 5]
+    # 피벗은 원본에 대응 시트가 없어 기본서식으로 떨어진다 — 사고가 아니라 결정이다
+    assert run.source_label == "기본서식", run.source_label
 
     # 같은 라벨·컬럼이 겹치면 조용히 덮지 않고 번호를 붙인다
     dup = ag.SheetData("x", 1, ["구분", "신고"], [["1월", 7], ["1월", 9]], [2, 3])
@@ -862,6 +864,34 @@ def test_synthesis_inherits_format(tmp: Path):
     print("  ✓ 합성 서식 상속(모드 B·C 오프셋·모드 D 요약 참조 행·양식 우선·폴백)")
 
 
+def test_header_mismatch_counts_toward_total(tmp: Path):
+    """헤더불일치 시트로 갈린 행도 취합 개요의 결과 행수에 잡혀야 한다.
+
+    갈린 행이 total_rows에서 빠지면, 부서 하나가 통째로 헤더불일치로 걸러질 때
+    취합 개요는 '결과 0행'이라고 말하는데 워크북에는 그 행들이 실제로 들어 있는
+    모순이 생긴다 — 개요가 있는 이유(파일이 스스로 무엇이 빠졌는지 말한다)를
+    정면으로 어기는 셈이다.
+    """
+    a = tmp / "기획부.xlsx"
+    b = tmp / "총무부.xlsx"
+    make_book(a, {"예산": [["사번", "부서", "예산액"], ["A1", "기획부", 100], ["A2", "기획부", 200]]})
+    make_book(b, {"예산": [["사번", "부서", "예산액", "비고"],
+                          ["B1", "총무부", 300, "메모"]]})   # 헤더가 하나 더 많다 → 불일치
+    files = []
+    for path in (a, b):
+        uf = ag.read_file(path)
+        ag.review_stage1(uf, rules={})
+        files.append(uf)
+
+    wb, notes, run = ag.synthesize(files, "B", {}, [], all_files=files)
+    assert any("헤더불일치" in n for n in notes), notes
+    err_title = next(name for name in wb.sheetnames if "헤더불일치" in name)
+    assert wb[err_title].cell(row=4, column=1).value == "총무부"   # 갈린 행이 실제로 있다
+    # 기획부 2행(정상 시트) + 총무부 1행(헤더불일치 시트) = 3행이 진짜 결과다
+    assert run.result_rows == 3, run.result_rows
+    print("  ✓ 헤더불일치 시트로 빠진 행도 개요의 결과 행수에 반영된다")
+
+
 def test_overview_summary(tmp: Path):
     """결과 파일이 '무엇이 빠졌는지'를 스스로 말한다.
 
@@ -926,6 +956,7 @@ def main() -> int:
                    test_format_apply,
                    test_overview_summary,
                    test_synthesis_inherits_format,
+                   test_header_mismatch_counts_toward_total,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
