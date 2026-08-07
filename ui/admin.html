@@ -298,6 +298,23 @@
 </section>
 </main>
 
+
+<!-- 되돌릴 수 없는 작업 확인. 브라우저 기본 prompt()·confirm()은 환경에 따라 막혀 있어
+     (임베디드 웹뷰에서 "prompt() is not supported"가 떴다) 화면 안에서 받는다 -->
+<div id="ask" class="hidden fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-center justify-center px-6">
+<div class="w-full max-w-lg rounded-xl glass-card shadow-soft p-6 bg-surface">
+<h2 id="ask-title" class="text-headline-md font-headline-md"></h2>
+<p id="ask-body" class="mt-3 text-body-md font-body-md text-on-surface-variant whitespace-pre-line"></p>
+<label id="ask-label" class="hidden mt-4 block text-body-sm font-body-sm text-on-surface-variant"></label>
+<input id="ask-input" type="text" autocomplete="off"
+       class="hidden mt-2 w-full rounded-lg bg-surface border border-outline-variant text-body-md text-on-surface focus:border-primary focus:ring-primary/20 px-4 py-3">
+<div class="mt-6 flex gap-3 justify-end">
+<button id="ask-cancel" class="px-5 py-2.5 rounded-xl border border-outline-variant text-label-md font-label-md font-semibold hover:border-primary transition-all">취소</button>
+<button id="ask-ok" class="px-5 py-2.5 rounded-xl bg-error text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 transition-all">삭제</button>
+</div>
+</div>
+</div>
+
 <script>
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g,
@@ -415,12 +432,44 @@
     });
   }
 
+  /** 화면 안 확인 대화. `expect`를 주면 그 값을 그대로 입력해야 확인된다.
+      브라우저 기본 prompt()·confirm()은 환경에 따라 막혀 있어(실제로 막혔다) 쓰지 않는다. */
+  function ask({ title, body, label, expect, okText = '확인' }) {
+    return new Promise((resolve) => {
+      $('ask-title').textContent = title;
+      $('ask-body').textContent = body;
+      $('ask-ok').textContent = okText;
+      const needsInput = !!expect;
+      $('ask-label').textContent = label || '';
+      $('ask-label').classList.toggle('hidden', !needsInput);
+      $('ask-input').classList.toggle('hidden', !needsInput);
+      $('ask-input').value = '';
+      $('ask').classList.remove('hidden');
+      if (needsInput) setTimeout(() => $('ask-input').focus(), 50);
+
+      const close = (value) => {
+        $('ask').classList.add('hidden');
+        $('ask-ok').onclick = null; $('ask-cancel').onclick = null;
+        $('ask-input').onkeydown = null;
+        resolve(value);
+      };
+      $('ask-cancel').onclick = () => close(null);
+      $('ask-ok').onclick = () => close(needsInput ? $('ask-input').value : true);
+      $('ask-input').onkeydown = (e) => { if (e.key === 'Enter') $('ask-ok').click(); };
+    });
+  }
+
   async function act(action, id, emp) {
     clearError();
     try {
       if (action === 'delete') {
         // 계정과 그 자료가 모두 사라지므로 사번을 직접 입력받아 확인한다
-        const typed = prompt(`'${emp}' 계정과 업로드·취합 자료가 모두 삭제됩니다.\n되돌릴 수 없습니다.\n\n확인하려면 사번을 그대로 입력하세요:`);
+        const typed = await ask({
+          title: '계정 삭제',
+          body: `'${emp}' 계정과 업로드·취합 자료가 모두 삭제됩니다.\n되돌릴 수 없습니다.`,
+          label: '확인하려면 사번을 그대로 입력하세요',
+          expect: emp, okText: '삭제',
+        });
         if (typed == null) return;
         if (typed.trim().toLowerCase() !== emp.toLowerCase()) return showError('사번이 일치하지 않아 취소했습니다.');
         const r = await api(`/api/admin/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -477,8 +526,12 @@
 
   $('run-purge').addEventListener('click', async () => {
     if (!purgePlan || !purgePlan.projects.length) return;
-    if (!confirm(`작업 ${purgePlan.projects.length}건과 그 파일 ${purgePlan.files}건을 지웁니다. `
-                 + '되돌릴 수 없습니다. 계속할까요?')) return;
+    const go = await ask({
+      title: '보관 기간 정리',
+      body: `작업 ${purgePlan.projects.length}건과 그 파일 ${purgePlan.files}건을 지웁니다.\n되돌릴 수 없습니다.`,
+      okText: '지우기',
+    });
+    if (!go) return;
     clearError();
     $('run-purge').disabled = true;
     try {
