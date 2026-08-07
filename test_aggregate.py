@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """aggregate.py 자체 점검. 실행: python3 test_aggregate.py (프레임워크 없음)"""
 
+import contextlib
 import io
 import json
 import threading
@@ -466,14 +467,19 @@ def test_cli_end_to_end(tmp: Path):
     make_book(work / "총무부.xlsx", {"예산": [
         ["사번", "부서", "예산액"], ["B1", "총무부", None]]})     # 누락 → 오류 → 기본 제외
     out, report = tmp / "merged.xlsx", tmp / "report.xlsx"
-    code = ag.main([str(work), "--mode", "B", "--no-ai",
-                    "--out", str(out), "--report", str(report)])
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        code = ag.main([str(work), "--mode", "B", "--no-ai",
+                        "--out", str(out), "--report", str(report)])
     assert code == 0, code
     assert out.exists() and report.exists()
     ws = openpyxl.load_workbook(out)["예산"]
     # 헤더가 원본 자리(3행: 제목1 + 공백2 다음)로 복원되므로 데이터는 4행부터다
     depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
     assert depts == {"기획부"}, f"오류 파일은 기본 제외돼야 한다: {depts}"
+    # 결과 파일은 '예산' 1개 시트뿐이다 — '취합 개요'까지 세면 서버(server.py)와
+    # 다르게 시트 2개라고 말하게 된다
+    assert "시트 1개" in stdout.getvalue(), stdout.getvalue()
     rep = openpyxl.load_workbook(report)
     # 합성 뒤에 쓰므로 결과 행수·기준 서식을 실은 취합 개요가 맨 앞에 붙는다
     assert rep.sheetnames == ["취합 개요", "오류 목록", "자동교정 이력"], rep.sheetnames
@@ -800,6 +806,59 @@ def test_format_apply(tmp: Path):
     print("  ✓ 서식 적용(제목 블록·헤더 자리·필터/인쇄영역 재계산·기본서식·날짜 폴백·중간 실패 되돌리기·스타일 실패해도 재계산 진행)")
 
 
+def test_close_sheet_uses_actual_header_row(tmp: Path):
+    """open_sheet가 폴백해 실제 헤더를 1행에 쓰면 close_sheet도 그 실제 행을 써야 한다.
+
+    tpl.header_row(원본의 4행)를 그대로 믿으면, 폴백으로 헤더가 1행에 쓰였는데도
+    필터·틀고정이 4행 기준으로 계산돼 데이터 행을 헤더처럼 다룬다. 제목행에 걸린
+    행높이(162pt)도 delete_rows가 지우지 않으므로 폴백 헤더에 그대로 남는다.
+    """
+    bad = xf.FormatTemplate(
+        header_row=4,
+        title_rows=[
+            xf.TitleRow([(1, "2025년 리스트", xf.CellStyle())], 162),
+            xf.TitleRow([], None),
+            xf.TitleRow([(1, "※ 안내문", xf.CellStyle())], None),
+        ],
+        title_merges=[(5, 1, 1, 2)],   # min_row(5) > max_row(1) → merge_cells가 예외를 던진다
+    )
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    first = xf.open_sheet(ws, bad, ["가", "나"])
+    assert first == 2                        # 폴백 → 헤더 1행, 데이터 2행부터
+    for r, row in enumerate([["a", 1], ["b", 2], ["c", 3]], start=first):
+        ws.cell(row=r, column=1, value=row[0])
+        ws.cell(row=r, column=2, value=row[1])
+    xf.close_sheet(ws, bad, ["가", "나"], first, first + 2)
+
+    # tpl.header_row(4)가 아니라 실제 헤더 행(1)을 기준으로 재계산돼야 한다
+    assert ws.auto_filter.ref == "A1:B4", ws.auto_filter.ref
+    assert ws.freeze_panes == "A2", ws.freeze_panes
+    # 제목행의 162pt 행높이가 폴백 헤더(1행)에 남아 있지 않다
+    assert ws.row_dimensions[1].height is None, ws.row_dimensions[1].height
+    print("  ✓ close_sheet가 폴백 후 실제 헤더 행을 쓴다(필터·틀고정·제목행 행높이 청소)")
+
+
+def test_fit_width_ignores_formula_text(tmp: Path):
+    """수식이 든 열은 화면에 보이는 값이 아니라 헤더 길이로 폭을 잰다.
+
+    종합요약 시트의 지표 칸은 실제로는 '=SUMIF(...)' 같은 긴 수식 문자열을 담고
+    있어서, len(str(value))로 재면 60자 상한에 바로 닿는다 — 이 브랜치 이전에는
+    그 칸이 기본폭(8.43)이었던 회귀다.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    headers = ["부서", "온도차"]
+    tpl = xf.FormatTemplate(header_row=1)
+    first = xf.open_sheet(ws, tpl, headers)
+    ws.cell(row=first, column=1, value="대구")
+    ws.cell(row=first, column=2,
+            value="=SUMIF('대상 리스트'!A5:A5,$A2,'대상 리스트'!E5:E5)")
+    xf.close_sheet(ws, tpl, headers, first, first)
+    assert ws.column_dimensions["B"].width < 20, ws.column_dimensions["B"].width
+    print("  ✓ 수식 열은 수식 텍스트가 아니라 헤더 길이로 폭을 잰다")
+
+
 def test_synthesis_inherits_format(tmp: Path):
     """모드 B·C·D가 원본 양식의 서식을 이어받고, 열 오프셋만큼 밀어서 맞춘다."""
     files = []
@@ -822,6 +881,9 @@ def test_synthesis_inherits_format(tmp: Path):
     assert ws.column_dimensions["B"].width == 16.2        # 지사 = 원본 A열 너비
     assert ws.auto_filter.ref == "A4:E6"                  # 2행이 쌓였다
     assert ws.print_title_rows == "$1:$4"
+    # 숫자서식도 최종 취합 결과까지 실제로 살아남는다 — 이게 없으면 날짜가
+    # '2025-01-08 00:00:00'으로 보이는, 설계 §1이 지목한 그 증상이다
+    assert ws.cell(row=5, column=4).number_format == "mm-dd-yy"   # 점검일시(D열)
     assert run.aggregated == 2 and run.result_rows == 2
     assert "공통 서식" in run.source_label
     assert any("기준 서식" in n for n in notes)           # 화면 안내로도 나간다
@@ -872,7 +934,10 @@ def test_mode_a_own_format(tmp: Path):
     0이 된다 — 사진이 원본과 같은 데이터 행에 붙는다.
     """
     files = []
-    for dept, width in (("대구", 16.2), ("용인", 38.8)):
+    # 대구 폭은 _styled_form 기본값(16.2)과도, 용인 폭(38.8)과도 달라야 한다 —
+    # 16.2로 재설정하면 기본값과 우연히 같아져서, 대구 파일을 잘못된(엉뚱한) 원본에서
+    # 캡처하는 결함이 있어도 이 단언이 통과해 버린다(실측: 용인 쪽 단언만 걸린다)
+    for dept, width in (("대구", 24.6), ("용인", 38.8)):
         path = tmp / f"{dept}.xlsx"
         _styled_form(path)
         wb0 = openpyxl.load_workbook(path)
@@ -900,7 +965,7 @@ def test_mode_a_own_format(tmp: Path):
     assert wb.sheetnames == ["취합 개요", "대구_대상 리스트", "용인_대상 리스트"]
 
     # 파일마다 자기 열너비 — 다수결로 뭉개지 않는다
-    assert wb["대구_대상 리스트"].column_dimensions["A"].width == 16.2
+    assert wb["대구_대상 리스트"].column_dimensions["A"].width == 24.6
     assert wb["용인_대상 리스트"].column_dimensions["A"].width == 38.8
 
     ws = wb["대구_대상 리스트"]
@@ -995,6 +1060,29 @@ def test_overview_summary(tmp: Path):
     print("  ✓ 취합 개요(제출/취합/제외·제외 사유·기준 서식 표기)")
 
 
+def test_reason_truncates_and_discloses(tmp: Path):
+    """사유가 4종 이상이면 앞 3개만 보여주고 나머지 개수를 '외 N종'으로 밝힌다.
+
+    조용히 3개만 보여주면 사유가 그게 전부인 것처럼 읽힌다 — 잘랐다는 사실을
+    밝히는 것이 이 작업의 바인딩 제약이다. 지금까지 이 분기를 실행하는
+    테스트가 없어, 조용히 지어낸 것처럼 보이는 사유를 만들어도 걸리지 않았다.
+    """
+    bad = ag.UploadedFile(path=Path("총무부.xlsx"), dept="총무부")
+    bad.issues = [
+        ag.Issue("총무부.xlsx", "리스트", "A1", "누락", "1단계", ag.ERROR, "필수값 누락(A1)", "부서"),
+        ag.Issue("총무부.xlsx", "리스트", "B1", "정합성", "1단계", ag.ERROR, "형식 오류(B1)", "예산액"),
+        ag.Issue("총무부.xlsx", "리스트", "C1", "중복", "1단계", ag.ERROR, "중복 행(C1)", "사번"),
+        ag.Issue("총무부.xlsx", "리스트", "D1", "충돌", "1단계", ag.ERROR, "충돌 값(D1)", "지사"),
+    ]
+    run = ag.build_summary([bad], [], "B", "")
+    reason = run.files[0].reason
+    assert "외 1종" in reason, reason               # 4종 중 3개만 보여주고 나머지 1개는 밝힌다
+    for label in ("필수값 누락", "형식 오류", "중복 행"):
+        assert label in reason, reason
+    assert "충돌 값" not in reason, reason          # 4번째는 실제로 잘려 나갔다
+    print("  ✓ 사유 4종 이상은 앞 3개 + '외 N종'으로 잘림을 밝힌다")
+
+
 def test_report_format_and_order(tmp: Path):
     """리포트에 기본서식과 개요가 붙고, synthesize 뒤로 옮겨도 내용이 같다."""
     path = tmp / "대구.xlsx"
@@ -1045,7 +1133,10 @@ def main() -> int:
                    test_format_capture,
                    test_format_consensus,
                    test_format_apply,
+                   test_close_sheet_uses_actual_header_row,
+                   test_fit_width_ignores_formula_text,
                    test_overview_summary,
+                   test_reason_truncates_and_discloses,
                    test_synthesis_inherits_format,
                    test_header_mismatch_counts_toward_total,
                    test_mode_a_own_format,
