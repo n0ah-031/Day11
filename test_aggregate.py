@@ -16,6 +16,7 @@ from openpyxl.utils.units import EMU_to_pixels
 from PIL import Image as PILImage
 
 import aggregate as ag
+import xlsx_format as xf
 
 
 def make_book(path: Path, sheets: dict, title_row: bool = True) -> None:
@@ -550,6 +551,86 @@ def test_pivot_flatten(tmp: Path):
     print("  ✓ 피벗형 전개(B열 시작·시트명 통합·합계 제외·중복 번호·사진 제외)")
 
 
+def _styled_form(path: Path) -> None:
+    """실제 업무 양식의 구조를 재현한다 — 1행 병합 제목 / 3행 안내 / 4행 헤더 / 5행~ 데이터.
+
+    실측(sampledata 8개)에서 확인한 모양이다: 제목은 A1:D1 병합, 헤더는 볼드·배경색·
+    테두리, 열너비는 컬럼마다 다르고, 날짜 컬럼에 표시형식이 걸려 있다.
+    """
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    thin = Side(style="thin")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "대상 리스트"
+    ws["A1"] = "2025년 집중안전점검 리스트"
+    ws["A1"].font = Font(bold=True, size=20)
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+    ws.row_dimensions[1].height = 40
+    ws["A3"] = "※ 2024.11.01 기준으로 작성"
+    ws["A3"].font = Font(bold=True)
+    for c, name in enumerate(["지사", "개소", "점검일시", "온도차"], start=1):
+        cell = ws.cell(row=4, column=c, value=name)
+        cell.font = Font(bold=True, size=12)
+        cell.fill = PatternFill("solid", fgColor="C0C0C0")
+        cell.border = Border(bottom=thin, top=thin, left=thin, right=thin)
+        cell.alignment = Alignment(horizontal="center")
+    ws.append(["대구", 2, "2025-01-08", 3.3])
+    for c in range(1, 5):
+        ws.cell(row=5, column=c).border = Border(bottom=thin, top=thin, left=thin, right=thin)
+    ws.cell(row=5, column=3).number_format = "mm-dd-yy"
+    ws.cell(row=5, column=2).number_format = "0_);[Red]\\(0\\)"
+    for letter, width in (("A", 16.2), ("C", 30.8), ("D", 33.0)):
+        ws.column_dimensions[letter].width = width
+    ws.print_title_rows = "$1:$4"
+    ws.page_setup.orientation = "portrait"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    wb.save(path)
+
+
+def test_format_capture(tmp: Path):
+    """원본 양식에서 서식만 읽어낸다. 못 여는 파일은 예외가 아니라 None이다."""
+    path = tmp / "양식.xlsx"
+    _styled_form(path)
+
+    tpl = xf.capture(path, "대상 리스트", 4)
+    assert tpl is not None
+    assert tpl.header_row == 4
+    # 제목 블록은 헤더 앞 3행(제목·빈행·안내) 전부
+    assert len(tpl.title_rows) == 3
+    assert tpl.title_rows[0].cells[0][1] == "2025년 집중안전점검 리스트"
+    assert tpl.title_rows[0].height == 40
+    assert tpl.title_merges == [(1, 1, 1, 4)]
+    assert tpl.title_rows[2].cells[0][1] == "※ 2024.11.01 기준으로 작성"
+
+    # 헤더·데이터 스타일은 첫 컬럼 셀에서 뜬다
+    assert tpl.header_style.font.bold is True
+    assert tpl.header_style.fill.fgColor.rgb.endswith("C0C0C0")
+    assert tpl.data_style.border.bottom.style == "thin"
+
+    # 열너비·숫자서식은 컬럼 위치가 아니라 헤더 이름으로 담긴다
+    assert tpl.widths == {"지사": 16.2, "점검일시": 30.8, "온도차": 33.0}
+    assert tpl.number_formats["점검일시"] == "mm-dd-yy"
+    assert tpl.number_formats["개소"] == "0_);[Red]\\(0\\)"
+    assert "온도차" not in tpl.number_formats          # General은 담지 않는다
+    assert tpl.date_format == "mm-dd-yy"               # 날짜서식을 봤으면 폴백값도 그것
+
+    assert tpl.print_title_rows == "$1:$4"
+    assert tpl.fit_to_page is True
+    assert tpl.source_label == "양식.xlsx"
+
+    # 없는 시트 · 없는 파일 · 헤더 없는 시트는 예외가 아니라 None
+    assert xf.capture(path, "없는시트", 4) is None
+    assert xf.capture(tmp / "없는파일.xlsx", "대상 리스트", 4) is None
+    assert xf.capture(path, "대상 리스트", 99) is None
+
+    # 기본서식은 파일 없이도 만들어진다
+    b = xf.basic()
+    assert b.header_row == 1 and b.header_style.font.bold is True
+    assert b.source_label == "기본서식"
+    print("  ✓ 서식 캡처(제목 블록·스타일·헤더명 매칭 열너비/숫자서식·인쇄설정·폴백)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
@@ -558,6 +639,7 @@ def main() -> int:
                    test_image_anchor_relocation, test_real_form_structure,
                    test_stacked_tables_and_tiered_header, test_pivot_flatten,
                    test_stage2_parallel,
+                   test_format_capture,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
