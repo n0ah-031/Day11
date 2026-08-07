@@ -1351,20 +1351,31 @@ def build_summary(all_files, selected, mode: str, source_label: str,
 
 
 # ── 10.2 오류 리포트 ─────────────────────────────────────────────────────────
-def write_report(files: list[UploadedFile], path: Path) -> None:
+def write_report(files: list[UploadedFile], path: Path, overview=None) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "오류 목록"
-    ws.append(["파일명", "시트", "셀 위치", "오류 유형", "검증 단계", "사유", "작성 기준"])
+    issue_headers = ["파일명", "시트", "셀 위치", "오류 유형", "검증 단계", "사유", "작성 기준"]
+    ws.append(issue_headers)
     for uf in files:
         for issue in uf.issues:
             ws.append([issue.file, issue.sheet, issue.cell, issue.kind, issue.stage,
                        f"{issue.tag} {issue.reason}", issue.attr])
     ws2 = wb.create_sheet("자동교정 이력")
-    ws2.append(["파일명", "시트", "셀 위치", "원본값", "교정값", "적용 규칙"])
+    fix_headers = ["파일명", "시트", "셀 위치", "원본값", "교정값", "적용 규칙"]
+    ws2.append(fix_headers)
     for uf in files:
         for fix in uf.fixes:
             ws2.append([fix.file, fix.sheet, fix.cell, fix.original, fix.corrected, fix.rule])
+    if ws2.max_row == 1:
+        # 헤더만 있는 빈 시트는 만들다 만 것처럼 보인다 — 없다는 사실을 적는다
+        ws2.append(["해당 없음"])
+
+    # 리포트는 원본 양식과 무관한 문서라 상속 대상이 아니다. 기본서식만 입힌다
+    xf.close_sheet(ws, xf.basic(), issue_headers, 2, ws.max_row)
+    xf.close_sheet(ws2, xf.basic(), fix_headers, 2, ws2.max_row)
+    if overview is not None:
+        xf.overview_sheet(wb, 0, overview)
     wb.save(path)
 
 
@@ -1454,7 +1465,8 @@ def main(argv=None) -> int:
     forced = [uf for uf in selected if uf.grade == ERROR]
     print(f"\n취합 대상: {len(selected)}/{len(files)}건")
     if not selected:
-        write_report(files, Path(args.report))
+        write_report(files, Path(args.report),
+                     overview=build_summary(files, [], args.mode, ""))
         print(f"취합 가능한 파일이 없습니다. 오류 리포트: {args.report}")
         return 2
 
@@ -1463,7 +1475,7 @@ def main(argv=None) -> int:
 
     wb, notes, run = synthesize(selected, args.mode, group_map, summary_cols, all_files=files)
     wb.save(args.out)
-    write_report(files, Path(args.report))
+    write_report(files, Path(args.report), overview=run)
 
     print(f"\n결과: {args.out} (시트 {len(wb.sheetnames)}개)")
     print(f"오류 리포트: {args.report}")

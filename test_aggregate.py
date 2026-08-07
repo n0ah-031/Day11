@@ -475,7 +475,8 @@ def test_cli_end_to_end(tmp: Path):
     depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
     assert depts == {"기획부"}, f"오류 파일은 기본 제외돼야 한다: {depts}"
     rep = openpyxl.load_workbook(report)
-    assert rep.sheetnames == ["오류 목록", "자동교정 이력"], rep.sheetnames
+    # 합성 뒤에 쓰므로 결과 행수·기준 서식을 실은 취합 개요가 맨 앞에 붙는다
+    assert rep.sheetnames == ["취합 개요", "오류 목록", "자동교정 이력"], rep.sheetnames
     assert rep["오류 목록"].max_row >= 2, "누락 오류가 리포트에 기록돼야 한다"
 
     # 강제 포함 시에는 오류 파일도 취합에 들어간다 (§7, §10.1)
@@ -870,9 +871,6 @@ def test_mode_a_own_format(tmp: Path):
     헤더가 1행으로 당겨지지 않고 원본 행 번호에 놓이므로 이미지 앵커 보정이
     0이 된다 — 사진이 원본과 같은 데이터 행에 붙는다.
     """
-    from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
-    from openpyxl.drawing.xdr import XDRPositiveSize2D
-
     files = []
     for dept, width in (("대구", 16.2), ("용인", 38.8)):
         path = tmp / f"{dept}.xlsx"
@@ -997,6 +995,45 @@ def test_overview_summary(tmp: Path):
     print("  ✓ 취합 개요(제출/취합/제외·제외 사유·기준 서식 표기)")
 
 
+def test_report_format_and_order(tmp: Path):
+    """리포트에 기본서식과 개요가 붙고, synthesize 뒤로 옮겨도 내용이 같다."""
+    path = tmp / "대구.xlsx"
+    _styled_form(path)
+    uf = ag.read_file(path)
+    uf.dept = "대구"
+    ag.review_stage1(uf, {})
+    before = ([(i.file, i.sheet, i.cell, i.reason) for i in uf.issues],
+              [(f.cell, f.original, f.corrected) for f in uf.fixes])
+
+    # 종전 순서(리포트 먼저)와 새 순서(합성 먼저)의 내용이 같아야 한다
+    ag.preprocess(uf)
+    wb, _, run = ag.synthesize([uf], "B", {}, [], all_files=[uf])
+    after = ([(i.file, i.sheet, i.cell, i.reason) for i in uf.issues],
+             [(f.cell, f.original, f.corrected) for f in uf.fixes])
+    assert before == after, "preprocess·synthesize가 issues/fixes를 건드리면 순서를 바꿀 수 없다"
+
+    out = tmp / "report.xlsx"
+    ag.write_report([uf], out, overview=run)
+    rb = openpyxl.load_workbook(out)
+    assert rb.sheetnames == ["취합 개요", "오류 목록", "자동교정 이력"]
+    ws = rb["오류 목록"]
+    assert ws.cell(row=1, column=1).font.bold is True
+    assert ws.freeze_panes == "A2"
+    assert ws.auto_filter.ref.startswith("A1:G")
+    assert ws.column_dimensions["A"].width <= xf.MAX_WIDTH
+
+    # 자동교정이 0건이면 빈 시트로 두지 않고 그렇게 적는다
+    fixes = rb["자동교정 이력"]
+    if fixes.max_row == 2:
+        assert fixes.cell(row=2, column=1).value == "해당 없음"
+
+    # overview 없이도 돈다(취합 가능한 파일이 0건인 경로)
+    out2 = tmp / "report2.xlsx"
+    ag.write_report([uf], out2)
+    assert openpyxl.load_workbook(out2).sheetnames == ["오류 목록", "자동교정 이력"]
+    print("  ✓ 리포트 서식·개요·호출 순서 불변")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
@@ -1012,6 +1049,7 @@ def main() -> int:
                    test_synthesis_inherits_format,
                    test_header_mismatch_counts_toward_total,
                    test_mode_a_own_format,
+                   test_report_format_and_order,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()

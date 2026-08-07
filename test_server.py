@@ -329,7 +329,8 @@ def test_dept_names():
     res = client.get(f"/api/session/{sid}/download/result")
     wb = openpyxl.load_workbook(io.BytesIO(res.content))
     ws = wb["예산"]
-    depts = {ws.cell(row=r, column=1).value for r in range(2, ws.max_row + 1)}
+    # 원본 서식을 상속해 제목 블록(1행)·공백(2행)을 되살리므로 헤더는 3행, 데이터는 4행부터다
+    depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
     assert depts == {"대구", "판교지사"}, depts
 
     # 모드 A는 시트명에도 쓰인다
@@ -338,7 +339,8 @@ def test_dept_names():
     wait(client.post(f"/api/session/{sid}/aggregate", json={"mode": "A", "included": [0, 1]}))
     wb = openpyxl.load_workbook(io.BytesIO(
         client.get(f"/api/session/{sid}/download/result").content))
-    assert sorted(wb.sheetnames) == ["대구_예산", "판교지사_예산"], wb.sheetnames
+    # 결과 파일에는 취합 개요 시트도 함께 실린다
+    assert sorted(wb.sheetnames) == ["대구_예산", "취합 개요", "판교지사_예산"], wb.sheetnames
     print("  ✓ 부서명 후보 추천 + 사용자 지정이 결과에 반영")
 
 

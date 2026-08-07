@@ -30,6 +30,7 @@ import auth
 import formgen as fg
 import hwpx_merge as hm
 import store
+import xlsx_format as xf
 
 BASE = Path(__file__).parent
 # 업로드 상한은 `_limits()`가 정책에서 읽는다(기본값은 store.DEFAULT_LIMITS) — Admin에서
@@ -582,19 +583,24 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
                 store.update_job(job_id, progress=int(done / steps * 100))
 
         try:
-            step("오류 리포트를 쓰는 중", 0)
-            report_path = session["dir"] / "error_report.xlsx"
-            ag.write_report(files, report_path)
-            session["report"] = report_path
-
-            step("자동교정하는 중", 1)
+            step("자동교정하는 중", 0)
             for uf in selected:
                 ag.preprocess(uf)
             session["preprocessed"] = True   # 셀 값이 바뀌었으니 재검토 시 원본을 다시 읽어야 한다
 
-            step("시트를 합치는 중", 2)
-            wb, notes = ag.synthesize(selected, mode,
-                                      body.get("group_map") or {}, body.get("summary_cols") or [])
+            step("시트를 합치는 중", 1)
+            wb, notes, run = ag.synthesize(selected, mode,
+                                           body.get("group_map") or {},
+                                           body.get("summary_cols") or [],
+                                           all_files=files)
+
+            # 리포트는 합성 뒤에 쓴다 — 결과 행수와 기준 서식을 개요에 실어야 한다.
+            # issues/fixes는 review_stage1이 확정하고 preprocess·synthesize가 건드리지
+            # 않으므로 순서를 바꿔도 내용은 같다(test_report_format_and_order가 지킨다)
+            step("오류 리포트를 쓰는 중", 2)
+            report_path = session["dir"] / "error_report.xlsx"
+            ag.write_report(files, report_path, overview=run)
+            session["report"] = report_path
 
             step("결과 파일을 저장하는 중", 3)
             result = session["dir"] / "merged.xlsx"
@@ -609,14 +615,16 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
 
         # Fix에는 컬럼명이 없으므로 같은 셀의 이슈에서 작성기준을 끌어온다
         attr_of = {(i.file, i.sheet, i.cell): i.attr for uf in selected for i in uf.issues}
+        # 개요는 데이터 시트가 아니라 안내다. 세면 '결과 시트 N개'가 틀린 값이 된다
+        data_sheets = [s for s in wb.sheetnames if s != xf.OVERVIEW_SHEET]
         payload = {
             "metrics": {
                 "aggregated": len(selected),
-                "sheets": len(wb.sheetnames),
+                "sheets": len(data_sheets),                       # ← wb.sheetnames 대신
                 "autofixed": sum(len(uf.fixes) for uf in selected),
                 "excluded": len(files) - len(selected),
             },
-            "result_sheets": wb.sheetnames,
+            "result_sheets": data_sheets,                         # ← wb.sheetnames 대신
             "excluded_files": [{"name": uf.name, "issue_count": len(uf.issues)}
                                for i, uf in enumerate(files) if i not in set(picked)],
             "autofixes": [{"sheet": f.sheet, "cell": f.cell,
@@ -627,6 +635,7 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
             "forced_notice": [i.line() for uf in selected if uf.grade == ag.ERROR
                               for i in uf.issues if i.grade == ag.ERROR],
             "notes": list(dict.fromkeys(notes)),
+            "format_source": run.source_label,                    # ← 신규
         }
         if job_id:
             result_url = store.put_result(session["project_id"], job_id, result, "merged")
