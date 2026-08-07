@@ -864,6 +864,60 @@ def test_synthesis_inherits_format(tmp: Path):
     print("  ✓ 합성 서식 상속(모드 B·C 오프셋·모드 D 요약 참조 행·양식 우선·폴백)")
 
 
+def test_mode_a_own_format(tmp: Path):
+    """모드 A는 원본 보존형이라 각 시트가 자기 파일의 서식을 쓴다.
+
+    헤더가 1행으로 당겨지지 않고 원본 행 번호에 놓이므로 이미지 앵커 보정이
+    0이 된다 — 사진이 원본과 같은 데이터 행에 붙는다.
+    """
+    from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+    from openpyxl.drawing.xdr import XDRPositiveSize2D
+
+    files = []
+    for dept, width in (("대구", 16.2), ("용인", 38.8)):
+        path = tmp / f"{dept}.xlsx"
+        _styled_form(path)
+        wb0 = openpyxl.load_workbook(path)
+        wb0["대상 리스트"].column_dimensions["A"].width = width
+        wb0.save(path)
+        uf = ag.read_file(path)
+        uf.dept = dept
+        files.append(uf)
+
+    # 원본 5행(데이터 첫 행)에 붙은 사진 하나
+    # 주의: sheet.images의 실제 내부 스키마(marker_from/marker_to/display/resolution 등,
+    # aggregate.py의 _read_images/_shift_anchor 참고)에 맞춰 구성한다. from·to는 1-base
+    # (행, 열), marker_from은 0-base (열, 행, 열오프셋, 행오프셋)이다.
+    buf = io.BytesIO()
+    PILImage.new("RGB", (300, 300), "red").save(buf, format="PNG")
+    data = buf.getvalue()
+    files[0].sheets[0].images = [{
+        "from": (5, 1), "to": (5, 1), "single_cell_anchor": True,
+        "marker_from": (0, 4, 0, 0), "marker_to": None, "edit_as": "oneCell",
+        "display": (300, 300), "ext": "png", "bytes": len(data), "data": data,
+        "sha256": "", "resolution": (300, 300),
+    }]
+
+    wb, notes, run = ag.synthesize(files, "A", {}, [], all_files=files)
+    assert wb.sheetnames == ["취합 개요", "대구_대상 리스트", "용인_대상 리스트"]
+
+    # 파일마다 자기 열너비 — 다수결로 뭉개지 않는다
+    assert wb["대구_대상 리스트"].column_dimensions["A"].width == 16.2
+    assert wb["용인_대상 리스트"].column_dimensions["A"].width == 38.8
+
+    ws = wb["대구_대상 리스트"]
+    assert ws["A1"].value == "2025년 집중안전점검 리스트"
+    assert ws.cell(row=4, column=1).value == "지사"      # 부서 컬럼 없음, 원본 자리
+    assert ws.cell(row=5, column=1).value == "대구"
+    assert ws.auto_filter.ref == "A4:D5"
+
+    # 헤더가 제자리라 앵커 보정이 0 → 사진이 원본과 같은 행(5행 = 앵커 index 4)
+    assert len(ws._images) == 1
+    assert ws._images[0].anchor._from.row == 4
+    assert "파일별 원본 서식" in run.source_label or "양식" in run.source_label
+    print("  ✓ 모드 A(파일별 자기 서식·헤더 원본 자리·앵커 보정 0)")
+
+
 def test_header_mismatch_counts_toward_total(tmp: Path):
     """헤더불일치 시트로 갈린 행도 취합 개요의 결과 행수에 잡혀야 한다.
 
@@ -957,6 +1011,7 @@ def main() -> int:
                    test_overview_summary,
                    test_synthesis_inherits_format,
                    test_header_mismatch_counts_toward_total,
+                   test_mode_a_own_format,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
