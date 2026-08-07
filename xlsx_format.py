@@ -157,3 +157,67 @@ def basic(date_format: str = DEFAULT_DATE_FORMAT) -> FormatTemplate:
         date_format=date_format,
         source_label="기본서식",
     )
+
+
+def _mode(values: list, key=None):
+    """최빈값과 (득표수, 전체수). 동수면 먼저 들어온 것 — 호출자가 파일명 순으로 넣는다.
+
+    dict는 삽입 순서를 지키고 max는 동점일 때 먼저 만난 키를 돌려주므로
+    별도 tie-break 없이 '첫 파일 우선'이 된다.
+    """
+    counts: dict = {}
+    first: dict = {}
+    for value in values:
+        k = key(value) if key else str(value)
+        counts[k] = counts.get(k, 0) + 1
+        first.setdefault(k, value)
+    if not counts:
+        return None, 0, 0
+    best = max(counts, key=lambda k: counts[k])
+    return first[best], counts[best], len(values)
+
+
+def _title_key(tpl: FormatTemplate) -> str:
+    rows = [(tr.height, [(c, v) for c, v, _ in tr.cells]) for tr in tpl.title_rows]
+    return f"{rows}|{tpl.title_merges}"
+
+
+def consensus(templates: list) -> FormatTemplate | None:
+    """항목별 최빈값으로 기준 서식을 만든다 (설계 §3 규칙 2).
+
+    파일 단위로 대표 1개를 뽑지 않는 이유: 지사마다 손댄 곳이 다르면 '완전히
+    일치하는 그룹'이 잘게 부서진다. 항목별로 세면 각 항목이 원래 값으로 수렴한다.
+    """
+    tpls = [t for t in templates if t is not None]
+    if not tpls:
+        return None
+    if len(tpls) == 1:
+        return tpls[0]
+
+    out = FormatTemplate()
+    out.header_row = _mode([t.header_row for t in tpls])[0]
+    out.header_style = _mode([t.header_style for t in tpls], key=lambda s: s.key())[0]
+    out.data_style = _mode([t.data_style for t in tpls], key=lambda s: s.key())[0]
+    out.orientation = _mode([t.orientation for t in tpls])[0]
+    out.fit_to_page = _mode([t.fit_to_page for t in tpls])[0]
+    out.print_title_rows = _mode([t.print_title_rows for t in tpls])[0]
+    out.date_format = _mode([t.date_format for t in tpls])[0]
+
+    # 제목 블록은 통째로 한 벌을 고른다 — 행마다 섞으면 어느 파일에도 없던 제목이 된다
+    picked = _mode(tpls, key=_title_key)[0]
+    out.title_rows, out.title_merges = picked.title_rows, picked.title_merges
+
+    minority = 0
+    for name in {n for t in tpls for n in t.widths}:
+        value, hit, total = _mode([t.widths[name] for t in tpls if name in t.widths])
+        out.widths[name] = value
+        if hit < total:
+            minority += 1
+    for name in {n for t in tpls for n in t.number_formats}:
+        out.number_formats[name] = _mode(
+            [t.number_formats[name] for t in tpls if name in t.number_formats])[0]
+
+    out.source_label = f"취합 파일 {len(tpls)}개의 공통 서식"
+    if minority:
+        out.source_label += f" (열너비 {minority}개는 다수값 채택)"
+    return out

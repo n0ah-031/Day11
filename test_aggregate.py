@@ -631,6 +631,43 @@ def test_format_capture(tmp: Path):
     print("  ✓ 서식 캡처(제목 블록·스타일·헤더명 매칭 열너비/숫자서식·인쇄설정·폴백)")
 
 
+def test_format_consensus(tmp: Path):
+    """회신본마다 손댄 열너비를 걷어내고 원래 배포된 양식을 되찾는다.
+
+    실측(sampledata 8개): 글꼴·색·숫자서식·제목은 8/8 만장일치이고 갈리는 것은
+    열너비뿐이었다(한 지사만 A열을 38.8로 늘려 놓았다). 그래서 다수결은
+    '손댄 흔적을 걷어내는' 장치다.
+    """
+    caps = []
+    for i, width in enumerate([16.2, 16.2, 16.2, 38.8]):
+        path = tmp / f"{i}.xlsx"
+        _styled_form(path)
+        wb = openpyxl.load_workbook(path)
+        wb["대상 리스트"].column_dimensions["A"].width = width
+        wb.save(path)
+        caps.append(xf.capture(path, "대상 리스트", 4))
+
+    merged = xf.consensus(caps)
+    assert merged.widths["지사"] == 16.2            # 3:1로 다수값이 이긴다
+    assert merged.widths["온도차"] == 33.0          # 갈리지 않은 값은 그대로
+    assert merged.number_formats["점검일시"] == "mm-dd-yy"
+    assert merged.header_style.font.bold is True
+    assert merged.print_title_rows == "$1:$4"
+    assert len(merged.title_rows) == 3
+    assert "취합 파일 4개의 공통 서식" in merged.source_label
+    assert "열너비 1개" in merged.source_label       # 소수 의견이 있었음을 밝힌다
+
+    # 동수면 먼저 들어온 것(호출자가 파일명 오름차순으로 넣는다)
+    two = [caps[0], caps[3]]
+    assert xf.consensus(two).widths["지사"] == 16.2
+
+    # 캡처 실패가 섞여도 나머지로 만든다. 전부 실패면 None
+    assert xf.consensus([None, caps[0], None]).widths["지사"] == 16.2
+    assert xf.consensus([None, None]) is None
+    assert xf.consensus([]) is None
+    print("  ✓ 서식 다수결(열너비 소수의견 제거·동수는 첫 파일·캡처 실패 혼재)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
@@ -640,6 +677,7 @@ def main() -> int:
                    test_stacked_tables_and_tiered_header, test_pivot_flatten,
                    test_stage2_parallel,
                    test_format_capture,
+                   test_format_consensus,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
