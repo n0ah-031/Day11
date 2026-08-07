@@ -17,19 +17,29 @@ VM은 이 셋을 그냥 만족합니다. 서버리스에서 설정으로 우회�
 
 ## 1. VM 만들기
 
+> **가입할 때 홈 리전을 서울로 고르세요.** Always Free 자원은 **홈 리전에서만** 무료이고,
+> 홈 리전은 가입 시 정해집니다(나중에 바꾸기 어렵습니다). 다른 리전에 만들면 그냥 과금됩니다.
+> 이미 다른 홈 리전으로 가입하셨다면 그 리전에 만드세요 — Supabase(서울)와 멀어져 느려지지만
+> 동작은 합니다.
+
 Oracle Cloud 콘솔 → Compute → Instances → Create instance
 
 | 항목 | 값 |
 |---|---|
-| Region | **ap-seoul-1**(서울) — Supabase와 같은 도시 |
-| Shape | **VM.Standard.A1.Flex** (ARM Ampere) · 1 OCPU · 6GB 정도면 충분합니다 |
-| Image | Ubuntu 24.04 (ARM) |
-| SSH 키 | 새로 만들어 받아 두세요 |
+| Region | 홈 리전(권장: **ap-seoul-1** 서울 — Supabase와 같은 도시) |
+| Shape | **VM.Standard.A1.Flex** (ARM Ampere) · **1 OCPU · 6GB** |
+| Image | Canonical Ubuntu 24.04 (aarch64) |
+| Boot volume | 기본 50GB 그대로 |
+| SSH 키 | "Generate a key pair for me"로 만들고 **private key를 반드시 받아두세요**(다시 못 받습니다) |
 
-> **A1(ARM)이 "out of capacity"로 안 만들어지는 일이 잦습니다.** 그때는
-> `VM.Standard.E2.1.Micro`(AMD, 1 OCPU·1GB, 2대까지 무료)로 만드세요. 메모리 1GB는
-> 데모 규모에 충분합니다(30개 파일 취합 실측 최대 RSS 378MB). 리전을 도쿄로 바꾸면
-> A1 용량이 나는 경우도 있는데, 그러면 Supabase와 거리가 멀어집니다.
+Always Free 한도는 A1이 **전체 2 OCPU · 12GB**, 블록 스토리지 합계 200GB입니다. 위 구성이면
+한도의 절반만 씁니다.
+
+> **A1(ARM)이 "Out of capacity"로 안 만들어지는 일이 잦습니다.** 가용성 도메인(AD)을 바꿔가며
+> 재시도하는 게 첫 번째 방법입니다. 그래도 안 되면 `VM.Standard.E2.1.Micro`(2대까지 무료)가
+> 있는데 **1/8 OCPU · 1GB**로 성능이 많이 낮습니다 — 메모리는 데모 규모에 충분하지만(30개
+> 파일 취합 실측 최대 RSS 378MB) 엑셀 파싱이 CPU를 쓰는 작업이라 체감이 느립니다. A1이 날
+> 때까지 기다렸다 쓰는 편을 권합니다.
 
 ## 2. 포트 열기 — **두 군데를 다 열어야 합니다**
 
