@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
+import xlsx_format as xf
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor, TwoCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
@@ -1255,6 +1256,40 @@ def _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes) -> None
             else:
                 ws.cell(row=r, column=c, value="N/A")     # §9 지정 컬럼 부재 시
                 notes.append(f"요약 지표 '{col}'을(를) 찾을 수 없어 '{dept}' 행에 N/A로 표기했습니다.")
+
+
+def _reason_of(uf: UploadedFile) -> str:
+    """제외·경고 사유를 사람이 읽을 한 줄로 줄인다. 같은 사유는 건수로 묶는다."""
+    if not uf.readable:
+        return "파일을 읽지 못했습니다"
+    pool = [i for i in uf.issues if i.grade == ERROR] or \
+           [i for i in uf.issues if i.grade == WARN]
+    if not pool:
+        return ""
+    counts: dict[str, int] = {}
+    for issue in pool:
+        # 사유 뒤의 괄호는 셀 위치 같은 개별 정보라 묶을 때는 뗀다
+        label = issue.reason.split("(")[0].strip()
+        counts[label] = counts.get(label, 0) + 1
+    shown = list(counts.items())[:3]
+    text = " · ".join(f"{label} {n}건" for label, n in shown)
+    if len(counts) > len(shown):
+        # 잘랐다는 사실을 밝힌다 — 조용히 줄이면 그게 전부인 것처럼 읽힌다
+        text += f" 외 {len(counts) - len(shown)}종"
+    return text
+
+
+def build_summary(all_files, selected, mode: str, source_label: str,
+                  result_rows: int = 0) -> xf.RunSummary:
+    """취합 개요에 실을 현황. CLI·웹이 같은 값을 쓰도록 엔진에서 만든다."""
+    picked = {id(uf) for uf in selected}
+    rows = [xf.FileRow(dept=uf.dept, name=uf.name, status=uf.status,
+                       included=id(uf) in picked,
+                       rows=sum(len(s.rows) for s in uf.sheets),
+                       reason=_reason_of(uf))
+            for uf in all_files]
+    return xf.RunSummary(mode=mode, source_label=source_label,
+                         result_rows=result_rows, files=rows)
 
 
 # ── 10.2 오류 리포트 ─────────────────────────────────────────────────────────

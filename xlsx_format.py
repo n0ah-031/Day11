@@ -336,3 +336,67 @@ def close_sheet(ws, tpl: FormatTemplate, out_headers: list, first_data_row: int,
                 ws.row_dimensions[row].height = height
     except Exception:
         pass
+
+
+@dataclass
+class FileRow:
+    dept: str = ""
+    name: str = ""
+    status: str = ""
+    included: bool = False
+    rows: int = 0
+    reason: str = ""
+
+
+@dataclass
+class RunSummary:
+    mode: str = "B"
+    source_label: str = ""
+    result_rows: int = 0
+    files: list = field(default_factory=list)
+
+    @property
+    def submitted(self) -> int:
+        return len(self.files)
+
+    @property
+    def aggregated(self) -> int:
+        return sum(1 for f in self.files if f.included)
+
+    @property
+    def excluded(self) -> int:
+        return self.submitted - self.aggregated
+
+
+OVERVIEW_SHEET = "취합 개요"
+
+
+def overview_sheet(wb, index: int, run: RunSummary) -> None:
+    """제출·취합·제외 현황 시트. merged와 report 양쪽이 같은 함수를 쓴다 —
+    어느 파일만 전달되어도 누락을 놓치지 않게."""
+    try:
+        ws = wb.create_sheet(OVERVIEW_SHEET, index)
+        ws["A1"] = "취합 개요"
+        ws["A1"].font = Font(bold=True, size=14)
+        ws["A2"] = f"모드 {run.mode}"
+        ws["A3"] = f"기준 서식: {run.source_label or '없음(기본서식 적용)'}"
+        ws["A4"] = (f"제출 {run.submitted} · 취합 {run.aggregated} · "
+                    f"제외 {run.excluded} · 결과 {run.result_rows}행")
+        for c, name in enumerate(["부서", "파일명", "판정", "취합", "행수", "사유"], start=1):
+            cell = ws.cell(row=6, column=c, value=name)
+            cell.font = Font(bold=True)
+            cell.fill = _GREY
+            cell.border = _BOX
+            cell.alignment = Alignment(horizontal="center")
+        for r, item in enumerate(run.files, start=7):
+            ws.cell(row=r, column=1, value=item.dept)
+            ws.cell(row=r, column=2, value=item.name)
+            ws.cell(row=r, column=3, value=item.status)
+            ws.cell(row=r, column=4, value="○" if item.included else "✕")
+            ws.cell(row=r, column=5, value=item.rows if item.included else "—")
+            ws.cell(row=r, column=6, value=item.reason)
+        ws.freeze_panes = "A7"
+        for c, width in enumerate((18, 46, 8, 6, 8, 46), start=1):
+            ws.column_dimensions[get_column_letter(c)].width = width
+    except Exception:
+        pass

@@ -794,6 +794,57 @@ def test_format_apply(tmp: Path):
     print("  ✓ 서식 적용(제목 블록·헤더 자리·필터/인쇄영역 재계산·기본서식·날짜 폴백·중간 실패 되돌리기·스타일 실패해도 재계산 진행)")
 
 
+def test_overview_summary(tmp: Path):
+    """결과 파일이 '무엇이 빠졌는지'를 스스로 말한다.
+
+    종전에는 8개 중 2개가 통째로 빠져도 그 사실이 화면·stdout에만 있어서,
+    파일만 받은 사람은 6개가 전부인 줄 알았다.
+    """
+    good = ag.UploadedFile(path=Path("대구.xlsx"), dept="대구")
+    good.sheets = [ag.SheetData("리스트", 4, ["지사"], [["대구"], ["대구"]], [5, 6])]
+
+    bad = ag.UploadedFile(path=Path("중앙지사.xlsx"), dept="중앙지사")
+    bad.sheets = [ag.SheetData("리스트", 4, ["지사"], [], [])]
+    bad.issues = [ag.Issue("중앙지사.xlsx", "리스트", f"A{r}", "누락", "1단계",
+                           ag.ERROR, "필수값 누락", "지사") for r in range(5, 13)]
+
+    unread = ag.UploadedFile(path=Path("깨진파일.xlsx"), dept="깨진파일", readable=False)
+
+    run = ag.build_summary([good, bad, unread], [good], "B", "등록 양식 '리스트'",
+                           result_rows=2)
+    assert run.submitted == 3 and run.aggregated == 1 and run.excluded == 2
+    assert run.mode == "B" and run.result_rows == 2
+    rows = {f.name: f for f in run.files}
+    assert rows["대구.xlsx"].included is True and rows["대구.xlsx"].rows == 2
+    assert rows["대구.xlsx"].status == "정상" and rows["대구.xlsx"].reason == ""
+    assert rows["중앙지사.xlsx"].included is False
+    assert rows["중앙지사.xlsx"].reason == "필수값 누락 8건"
+    assert rows["깨진파일.xlsx"].reason == "파일을 읽지 못했습니다"
+
+    wb = openpyxl.Workbook()
+    wb.create_sheet("결과")
+    wb.remove(wb["Sheet"])
+    xf.overview_sheet(wb, 0, run)
+    assert wb.sheetnames == ["취합 개요", "결과"]        # 맨 앞이어야 열자마자 보인다
+    ws = wb["취합 개요"]
+    assert "제출 3" in ws["A4"].value and "취합 1" in ws["A4"].value
+    assert "제외 2" in ws["A4"].value and "결과 2행" in ws["A4"].value
+    assert "등록 양식" in ws["A3"].value
+    assert [ws.cell(row=6, column=c).value for c in range(1, 7)] == \
+        ["부서", "파일명", "판정", "취합", "행수", "사유"]
+    assert ws.cell(row=6, column=1).font.bold is True
+    body = {ws.cell(row=r, column=2).value: ws.cell(row=r, column=4).value
+            for r in range(7, 10)}
+    assert body["대구.xlsx"] == "○" and body["중앙지사.xlsx"] == "✕"
+
+    # 기준 서식이 없으면 없다고 적는다 — 0으로 단정하지 않는다
+    empty = ag.build_summary([], [], "B", "")
+    wb2 = openpyxl.Workbook()
+    xf.overview_sheet(wb2, 0, empty)
+    assert "없음(기본서식 적용)" in wb2["취합 개요"]["A3"].value
+    print("  ✓ 취합 개요(제출/취합/제외·제외 사유·기준 서식 표기)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
@@ -805,6 +856,7 @@ def main() -> int:
                    test_format_capture,
                    test_format_consensus,
                    test_format_apply,
+                   test_overview_summary,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
