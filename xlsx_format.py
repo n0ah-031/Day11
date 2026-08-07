@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 import openpyxl
@@ -221,3 +222,106 @@ def consensus(templates: list) -> FormatTemplate | None:
     if minority:
         out.source_label += f" (열너비 {minority}개는 다수값 채택)"
     return out
+
+
+def open_sheet(ws, tpl: FormatTemplate, col_offset: int, out_headers: list) -> int:
+    """제목 블록과 헤더 값을 쓰고 데이터 시작 행을 돌려준다.
+
+    제목 블록은 열 오프셋을 적용하지 않는다 — 문서 제목은 표의 컬럼이 아니라
+    시트 전체에 걸린 것이라, 앞에 부서 컬럼이 끼었다고 오른쪽으로 밀 이유가 없다.
+    대신 병합 범위는 출력 열수까지 넓혀 제목이 표 전체를 덮게 한다.
+    """
+    try:
+        for r, title in enumerate(tpl.title_rows, start=1):
+            for c, value, style in title.cells:
+                cell = ws.cell(row=r, column=c)
+                if value is not None:
+                    cell.value = value
+                style.put(cell)
+            if title.height:
+                ws.row_dimensions[r].height = title.height
+        for r0, c0, r1, c1 in tpl.title_merges:
+            ws.merge_cells(start_row=r0, start_column=c0,
+                           end_row=r1, end_column=max(c1, len(out_headers)))
+        header_row = tpl.header_row
+        for c, name in enumerate(out_headers, start=1):
+            ws.cell(row=header_row, column=c, value=name)
+        return header_row + 1
+    except Exception:
+        # 제목 블록을 못 쓰면 헤더만 1행에 놓고 진행한다. 값은 나와야 한다
+        for c, name in enumerate(out_headers, start=1):
+            ws.cell(row=1, column=c, value=name)
+        return 2
+
+
+def _has_datetime(ws, col: int, first_row: int, last_row: int) -> bool:
+    """그 컬럼에 날짜/시각 값이 하나라도 있는가. 표시형식을 상속받지 못한 날짜 컬럼을
+    찾는 데만 쓴다 — 값을 바꾸지 않고 보이는 형식만 정한다."""
+    for r in range(first_row, min(last_row, first_row + _FIT_SCAN_ROWS) + 1):
+        if isinstance(ws.cell(row=r, column=col).value, (datetime, date)):
+            return True
+    return False
+
+
+def _fit_width(ws, col: int, header_row: int, last_row: int) -> float:
+    longest = 0
+    for r in range(header_row, min(last_row, header_row + _FIT_SCAN_ROWS) + 1):
+        value = ws.cell(row=r, column=col).value
+        if value is not None:
+            longest = max(longest, len(str(value)))
+    return max(MIN_WIDTH, min(MAX_WIDTH, longest * _WIDTH_PER_CHAR + 2))
+
+
+def close_sheet(ws, tpl: FormatTemplate, out_headers: list, first_data_row: int,
+                last_row: int, row_heights: dict | None = None) -> None:
+    """헤더·데이터 서식, 열너비, 숫자서식, 틀고정·필터·인쇄설정을 마무리한다.
+
+    자동필터 범위와 인쇄영역은 원본 값을 쓰지 않고 **결과 행수로 재계산**한다.
+    회신본마다 데이터 행수가 달라 원본 값(A4:H63 등)은 결과와 무관하기 때문이다.
+    """
+    try:
+        header_row = tpl.header_row
+        last_row = max(last_row, header_row)
+
+        if tpl.header_style is not None:
+            for c in range(1, len(out_headers) + 1):
+                tpl.header_style.put(ws.cell(row=header_row, column=c))
+        if tpl.data_style is not None:
+            for r in range(first_data_row, last_row + 1):
+                for c in range(1, len(out_headers) + 1):
+                    tpl.data_style.put(ws.cell(row=r, column=c))
+
+        for c, name in enumerate(out_headers, start=1):
+            fmt = tpl.number_formats.get(name)
+            if not fmt and _has_datetime(ws, c, first_data_row, last_row):
+                # 상속할 표시형식이 없는 날짜 컬럼 — 그냥 두면 '2025-01-08 00:00:00'으로
+                # 보인다(이 작업이 고치려는 증상 그 자체다). 지어내지 않고 기준 서식에서
+                # 본 날짜 형식을 쓰고, 그것도 없으면 DEFAULT_DATE_FORMAT
+                fmt = tpl.date_format
+            if fmt:
+                for r in range(first_data_row, last_row + 1):
+                    ws.cell(row=r, column=c).number_format = fmt
+            width = tpl.widths.get(name)
+            if width is None:
+                width = _fit_width(ws, c, header_row, last_row)
+            ws.column_dimensions[get_column_letter(c)].width = width
+
+        last_col = get_column_letter(max(len(out_headers), 1))
+        ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+        ws.auto_filter.ref = f"A{header_row}:{last_col}{last_row}"
+        ws.print_area = f"A1:{last_col}{last_row}"
+        if tpl.print_title_rows:
+            ws.print_title_rows = tpl.print_title_rows
+        ws.page_setup.orientation = tpl.orientation
+        if tpl.fit_to_page:
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 0
+
+        # 사진을 옮겨 붙인 행만 원본 높이를 따른다. 나머지까지 원본 높이(85.5 등)를
+        # 쓰면 사진 없는 표가 화면을 넘긴다
+        for row, height in (row_heights or {}).items():
+            if height:
+                ws.row_dimensions[row].height = height
+    except Exception:
+        pass

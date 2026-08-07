@@ -672,6 +672,93 @@ def test_format_consensus(tmp: Path):
     print("  ✓ 서식 다수결(열너비 소수의견 제거·동수는 첫 파일·캡처 실패 혼재)")
 
 
+def test_format_apply(tmp: Path):
+    """캡처한 서식이 출력 시트에 옮겨진다. 필터·인쇄영역은 결과 행수로 재계산된다."""
+    src = tmp / "양식.xlsx"
+    _styled_form(src)
+    tpl = xf.capture(src, "대상 리스트", 4)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    out_headers = ["부서", "지사", "개소", "점검일시", "온도차"]   # 앞에 부서 1칸
+    first = xf.open_sheet(ws, tpl, 1, out_headers)
+    assert first == 5                     # 헤더가 원본과 같은 4행 → 데이터는 5행부터
+
+    rows = [["대구", "대구", 2, "2025-01-08", 3.3],
+            ["용인", "용인", 1, "2024-11-21", 10.9]]
+    for r, row in enumerate(rows, start=first):
+        for c, value in enumerate(row, start=1):
+            ws.cell(row=r, column=c, value=value)
+    xf.close_sheet(ws, tpl, out_headers, first, first + len(rows) - 1)
+
+    # 제목 블록: 값·병합·행높이가 살아 있고, 병합은 출력 열수(5)까지 넓어진다
+    assert ws["A1"].value == "2025년 집중안전점검 리스트"
+    assert ws.row_dimensions[1].height == 40
+    assert "A1:E1" in [str(m) for m in ws.merged_cells.ranges]
+    assert ws["A3"].value == "※ 2024.11.01 기준으로 작성"
+
+    # 헤더 행: 원본 자리(4행)에 원본 스타일
+    assert [ws.cell(row=4, column=c).value for c in range(1, 6)] == out_headers
+    assert ws.cell(row=4, column=1).font.bold is True
+    assert ws.cell(row=4, column=1).fill.fgColor.rgb.endswith("C0C0C0")
+
+    # 데이터 셀 서식 + 헤더 이름으로 따라온 숫자서식
+    assert ws.cell(row=5, column=1).border.bottom.style == "thin"
+    assert ws.cell(row=5, column=4).number_format == "mm-dd-yy"     # 점검일시
+    assert ws.cell(row=5, column=3).number_format == "0_);[Red]\\(0\\)"   # 개소
+
+    # 열너비: 오프셋만큼 밀려서 헤더 이름대로 붙는다. 부서 열은 값 길이에 맞춘다
+    assert ws.column_dimensions["B"].width == 16.2     # 지사
+    assert ws.column_dimensions["D"].width == 30.8     # 점검일시
+    assert xf.MIN_WIDTH <= ws.column_dimensions["A"].width <= xf.MAX_WIDTH
+
+    # 재계산 대상 — 원본은 A4:D5였지만 결과 행수로 다시 잡힌다
+    assert ws.auto_filter.ref == "A4:E6"
+    # openpyxl의 print_area는 읽을 때 시트명과 절대참조($)를 붙여 돌려준다(3.1.5 확정 동작) —
+    # 지정한 범위 자체는 A1:E6이고 그 부분만 확인한다
+    assert ws.print_area == "'Sheet'!$A$1:$E$6"
+    assert ws.freeze_panes == "A5"
+    assert ws.print_title_rows == "$1:$4"              # 반복행은 그대로
+
+    # 기본서식으로도 돈다 — 제목 블록이 없고 헤더가 1행
+    wb2 = openpyxl.Workbook()
+    ws2 = wb2.active
+    b = xf.basic()
+    f2 = xf.open_sheet(ws2, b, 0, ["가", "나"])
+    assert f2 == 2
+    ws2.cell(row=2, column=1, value="x")
+    ws2.cell(row=2, column=2, value="y")
+    xf.close_sheet(ws2, b, ["가", "나"], 2, 2)
+    assert ws2.cell(row=1, column=1).font.bold is True
+    assert ws2.auto_filter.ref == "A1:B2"
+    assert ws2.freeze_panes == "A2"
+
+    # 상속할 표시형식이 없는 날짜 컬럼은 그냥 두면 '2025-01-08 00:00:00'으로 보인다.
+    # 이 작업이 고치려는 증상이라 기본서식에서도 날짜 형식을 붙인다
+    import datetime as _dt
+    wb3 = openpyxl.Workbook()
+    ws3 = wb3.active
+    b3 = xf.basic()
+    f3 = xf.open_sheet(ws3, b3, 0, ["점검일", "메모"])
+    ws3.cell(row=f3, column=1, value=_dt.datetime(2025, 1, 8))
+    ws3.cell(row=f3, column=2, value="글자")
+    xf.close_sheet(ws3, b3, ["점검일", "메모"], f3, f3)
+    assert ws3.cell(row=f3, column=1).number_format == xf.DEFAULT_DATE_FORMAT
+    assert ws3.cell(row=f3, column=2).number_format == "General"   # 날짜가 아닌 칸은 그대로
+
+    # 기준 서식에서 본 날짜 형식이 있으면 그것을 쓴다(지어내지 않는다)
+    wb4 = openpyxl.Workbook()
+    ws4 = wb4.active
+    tpl4 = xf.capture(src, "대상 리스트", 4)
+    tpl4.number_formats.pop("점검일시")          # 그 컬럼만 상속 실패한 상황
+    h4 = ["지사", "개소", "점검일시", "온도차"]
+    f4 = xf.open_sheet(ws4, tpl4, 0, h4)
+    ws4.cell(row=f4, column=3, value=_dt.datetime(2025, 1, 8))
+    xf.close_sheet(ws4, tpl4, h4, f4, f4)
+    assert ws4.cell(row=f4, column=3).number_format == "mm-dd-yy"
+    print("  ✓ 서식 적용(제목 블록·헤더 자리·열 오프셋·필터/인쇄영역 재계산·기본서식·날짜 폴백)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
@@ -682,6 +769,7 @@ def main() -> int:
                    test_stage2_parallel,
                    test_format_capture,
                    test_format_consensus,
+                   test_format_apply,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
