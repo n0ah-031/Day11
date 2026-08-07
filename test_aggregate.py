@@ -657,9 +657,13 @@ def test_format_consensus(tmp: Path):
     assert "취합 파일 4개의 공통 서식" in merged.source_label
     assert "열너비 1개" in merged.source_label       # 소수 의견이 있었음을 밝힌다
 
-    # 동수면 먼저 들어온 것(호출자가 파일명 오름차순으로 넣는다)
+    # 동수면 먼저 들어온 것(호출자가 파일명 오름차순으로 넣는다). 값의 크기가 아니라
+    # 입력 순서를 따른다는 것은 양방향으로 뒤집어 봐야만 드러난다 — 한 방향만 보면
+    # '더 작은 값이 이긴다'는 잘못된 구현도 우연히 통과할 수 있다
     two = [caps[0], caps[3]]
     assert xf.consensus(two).widths["지사"] == 16.2
+    two_rev = [caps[3], caps[0]]
+    assert xf.consensus(two_rev).widths["지사"] == 38.8
 
     # 캡처 실패가 섞여도 나머지로 만든다. 전부 실패면 None
     assert xf.consensus([None, caps[0], None]).widths["지사"] == 16.2
