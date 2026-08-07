@@ -1,0 +1,47 @@
+# Oracle Cloud Always Free VM에서 돌리는 구성.
+#
+# 앱 + Caddy(리버스 프록시·자동 HTTPS) 두 개다. Caddy를 쓰는 이유는 인증 쿠키에 Secure를
+# 붙이려면 HTTPS가 필요하고(COOKIE_SECURE=1), 인증서를 자동으로 받아 갱신해 주기 때문이다.
+#
+# 앱은 **1개만 띄운다.** 업로드 세션과 잡 진행률이 프로세스 메모리에 있어서, 복제하면
+# 요청이 다른 컨테이너로 가면서 "세션을 찾을 수 없습니다"가 뜬다(scale 명령을 쓰지 말 것).
+
+services:
+  app:
+    build: .
+    restart: unless-stopped          # VM 재부팅·크래시 후 자동 기동
+    env_file: .env                   # OPENAI_*·SUPABASE_* 키. 저장소에 커밋되지 않는다
+    environment:
+      # HTTPS로 서비스하므로 쿠키에 Secure를 붙인다. 도메인 없이 HTTP로만 쓸 거면
+      # 0으로 내려야 로그인이 된다(그 경우 쿠키가 평문으로 오간다는 뜻이다)
+      COOKIE_SECURE: "${COOKIE_SECURE:-1}"
+      AI_CONCURRENCY: "6"
+    expose:
+      - "8080"                       # 외부에 직접 열지 않는다. Caddy만 통한다
+    # 헬스체크: 정적 화면 하나로 프로세스가 살아 있는지 본다(인증이 필요 없는 경로)
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/login.html')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 도메인이 있으면 그 이름을 넣는다(자동 HTTPS). 없으면 `:80`으로 두면 HTTP로만 뜬다
+      SITE_ADDRESS: "${SITE_ADDRESS:-:80}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data                    # 인증서. 지우면 매번 다시 발급받는다
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:
+  caddy_config:

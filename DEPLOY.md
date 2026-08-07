@@ -1,89 +1,115 @@
-# 배포
+# 배포 — Oracle Cloud Always Free
 
-컨테이너 이미지는 `Dockerfile` 하나로 어디든 올라갑니다. **선택한 곳은 Google Cloud Run**이고
-배포 스크립트는 [`deploy-cloudrun.sh`](deploy-cloudrun.sh)입니다. Fly.io 설정(`fly.toml`)도
-대안으로 남겨 뒀습니다.
+VM 한 대에 도커로 올립니다. 구성은 `docker-compose.yml`(앱 + Caddy) 하나입니다.
 
-## 이 앱이 호스팅에 거는 조건
+## 왜 이 방식인가
 
-세 가지가 구조에서 나옵니다 — 취향이 아닙니다.
+이 앱이 호스팅에 거는 조건은 셋이고, 전부 구조에서 나옵니다 — 취향이 아닙니다.
 
 | 조건 | 왜 | 안 지키면 |
 |---|---|---|
 | **인스턴스 1개** | 업로드 세션·잡 진행률이 프로세스 메모리(dict + 임시 폴더)에 있다 | 요청이 다른 인스턴스로 가면서 "세션을 찾을 수 없습니다" |
-| **응답 후에도 CPU 할당** | 긴 작업을 백그라운드 스레드로 돌리고 요청에는 즉시 `job_id`만 준다(`server._start_job`) | 취합이 진행되지 않거나 폴링 사이에만 찔끔 돈다 |
-| **요청 타임아웃 5분 이상** | 2단계 AI 재검증이 파일당 20초대다(30개 파일 실측 112초, HANDOFF §4) | 큰 취합이 잘린다 |
+| **응답 후에도 CPU가 돌 것** | 긴 작업을 백그라운드 스레드로 돌리고 요청에는 즉시 `job_id`만 준다(`server._start_job`) | 취합이 진행되지 않는다 |
+| **요청이 오래 걸려도 안 끊길 것** | 2단계 AI 재검증이 파일당 20초대(30개 파일 실측 112초, HANDOFF §4) | 큰 취합이 잘린다 |
 
-Vercel 같은 서버리스가 맞지 않는 이유가 이 표입니다.
+VM은 이 셋을 그냥 만족합니다. 서버리스에서 설정으로 우회해야 했던 것들이 문제가 되지 않고,
+**서울 리전(ap-seoul-1)**이라 Supabase(서울)와 같은 도시이며, 잠들지 않고, 무료입니다.
 
-## Cloud Run 배포
+## 1. VM 만들기
+
+Oracle Cloud 콘솔 → Compute → Instances → Create instance
+
+| 항목 | 값 |
+|---|---|
+| Region | **ap-seoul-1**(서울) — Supabase와 같은 도시 |
+| Shape | **VM.Standard.A1.Flex** (ARM Ampere) · 1 OCPU · 6GB 정도면 충분합니다 |
+| Image | Ubuntu 24.04 (ARM) |
+| SSH 키 | 새로 만들어 받아 두세요 |
+
+> **A1(ARM)이 "out of capacity"로 안 만들어지는 일이 잦습니다.** 그때는
+> `VM.Standard.E2.1.Micro`(AMD, 1 OCPU·1GB, 2대까지 무료)로 만드세요. 메모리 1GB는
+> 데모 규모에 충분합니다(30개 파일 취합 실측 최대 RSS 378MB). 리전을 도쿄로 바꾸면
+> A1 용량이 나는 경우도 있는데, 그러면 Supabase와 거리가 멀어집니다.
+
+## 2. 포트 열기 — **두 군데를 다 열어야 합니다**
+
+Oracle에서 가장 많이 걸리는 지점입니다. VCN 보안 목록만 열고 끝내면 접속이 안 됩니다.
 
 ```bash
-# 1. 준비 (한 번만)
-brew install --cask google-cloud-sdk     # 이 머신에는 아직 없습니다
-gcloud auth login
-gcloud config set project <프로젝트ID>    # 결제 계정이 연결돼 있어야 합니다
+# (A) 콘솔: VCN → Security List → Ingress Rules 에 0.0.0.0/0 TCP 80, 443 추가
 
-# 2. 배포
-./deploy-cloudrun.sh                      # 서비스명 기본값 chwihap
+# (B) VM 안의 방화벽. Ubuntu 이미지는 기본 iptables 규칙이 막고 있습니다
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
 ```
 
-스크립트가 하는 일: 필요한 API 켜기 → `.env`의 키 4개를 **Secret Manager**에 넣기(환경변수로
-넣으면 콘솔에서 그대로 보입니다) → 런타임 서비스 계정에 읽기 권한 주기 → `--source .`로
-빌드·배포. 끝나면 URL을 찍습니다.
+## 3. 도커 설치
 
-핵심 플래그와 이유는 스크립트 머리말에 적어 뒀습니다. **`--no-cpu-throttling`을 빼면 안
-됩니다** — Cloud Run 기본값은 응답을 보낸 뒤 CPU를 조여서 취합 스레드가 멈춥니다.
+```bash
+sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 git
+sudo usermod -aG docker $USER && newgrp docker
+```
 
-## 잠드는 것에 대해
+## 4. 앱 올리기
 
-`--min-instances 0`이라 **마지막 요청 뒤 15분이 지나면 인스턴스가 내려갑니다.** 다음 사용자가
-들어오면 다시 뜹니다(몇 초).
+```bash
+git clone https://github.com/n0ah-031/Day11.git && cd Day11
+git checkout claude/handoff-work-progress-f416b0
 
-| 잠들면 | |
-|---|---|
-| 사라짐 | 올려둔 파일(임시 폴더), 진행 중이던 취합, 진행률. 브라우저의 세션 ID는 404가 됩니다 |
-| 남음 | **로그인 상태**(JWT 쿠키를 서버 상태 없이 검증), 취합 결과·오류 리포트·이력·양식·감사 로그(전부 Supabase) |
+# 키는 저장소에 없습니다. 로컬 .env를 복사해 오세요(내용은 HANDOFF §0.3)
+scp .env ubuntu@<VM_IP>:~/Day11/.env      # 로컬에서 실행
 
-즉 **쓰다 만 작업만 잃고 끝낸 것은 잃지 않습니다.** 취합이 도는 동안에는 브라우저가 진행률을
-폴링하므로 잠들지 않습니다. 위험한 경우는 취합을 걸어놓고 탭을 닫는 것입니다.
+# 도메인이 있으면 (자동 HTTPS)
+SITE_ADDRESS=chwihap.example.com docker compose up -d --build
 
-항상 켜두려면 `--min-instances 1`로 바꾸면 됩니다. 그만큼 계속 과금됩니다.
+# 도메인이 없으면 (HTTP만) — 쿠키 Secure를 꺼야 로그인이 됩니다
+SITE_ADDRESS=:80 COOKIE_SECURE=0 docker compose up -d --build
+```
 
-## 비용
+`restart: unless-stopped`라 VM을 재부팅해도 자동으로 다시 뜹니다.
 
-Cloud Run 무료 범위는 월 **180,000 vCPU-초 · 360,000 GiB-초 · 200만 요청**입니다(Tier 1 리전
-기준 — 그래서 서울(Tier 2)이 아니라 도쿄를 씁니다). 다만 `--no-cpu-throttling`은
-**인스턴스가 살아 있는 내내** vCPU-초를 씁니다(요청 처리 중만이 아니라). 유휴 15분도
-포함되므로, 하루 몇 번 쓰는 데모라면 무료 범위 안이지만 **상시 트래픽이 있으면 넘어갑니다.**
-무료 범위가 인스턴스 기반 과금에도 그대로 적용되는지는 공식 문서에서 명시적으로 확인하지
-못했으니, 배포 후 첫 달 청구서를 한 번 확인하세요.
+확인:
 
-## 배포 전 확인
+```bash
+docker compose ps          # app·caddy 둘 다 Up
+curl -I http://<VM_IP>/login.html
+```
 
-| 항목 | 왜 |
-|---|---|
-| `AUTH_DISABLED`를 **넣지 않는다** | 켜지면 인증이 통째로 사라집니다. 키가 없으면 열리는 게 아니라 503으로 닫히므로(fail-closed) 그냥 두면 됩니다 |
-| `COOKIE_SECURE=1` | 스크립트가 넣습니다. 없으면 HTTPS에서도 쿠키에 Secure가 안 붙습니다 |
-| 인스턴스 1개 유지 | `--max-instances 1`을 늘리지 마세요 |
-| 첫 관리자 | 배포 후 `/login.html`에서 가입하고 로컬에서 `python3 manage_users.py promote <사번>` |
-| Supabase 무료 플랜 | 오래 안 쓰면 프로젝트가 일시정지됩니다. 발표 전에 한 번 접속해 깨워두세요 |
+## 5. 첫 관리자
+
+`/login.html`에서 가입한 뒤, 로컬(또는 VM)에서:
+
+```bash
+python3 manage_users.py promote <사번>
+```
+
+## 도메인과 HTTPS
+
+- **도메인이 있으면** `SITE_ADDRESS`에 도메인을 넣고 A 레코드를 VM IP로 걸어두면 Caddy가
+  Let's Encrypt 인증서를 자동으로 받아 갱신합니다. 이때 `COOKIE_SECURE=1`(기본값)입니다.
+- **없으면** HTTP로만 뜹니다. 그 경우 **반드시 `COOKIE_SECURE=0`**으로 내려야 로그인이
+  됩니다 — Secure 쿠키는 HTTPS에서만 전송되기 때문입니다. 대신 **인증 쿠키가 평문으로
+  오갑니다.** 발표용 임시 운영이면 감수할 만하지만, 실제로 쓰실 거면 도메인을 붙이세요.
 
 ## 로컬 도커로 확인한 것
 
-배포 설정만 만들고 "됐다"고 하지 않기 위해, 같은 이미지를 로컬에서 띄워 확인했습니다.
+배포 설정만 만들고 "됐다"고 하지 않기 위해, 같은 구성을 로컬에서 띄워 확인했습니다.
 
-- 빌드 성공(741MB — cryptography 12MB·pillow 18MB·openai 5.7MB가 큽니다)
-- 화면 7개 전부 200, 로그인 없이 `POST /api/session`은 401(인증 게이트 동작)
-- 컨테이너 안에서 **실제 Supabase 상대로 전 구간**: 가입 → 로그인 → 업로드 2개 →
-  검토(정상 2건) → 모드 B 취합 → 결과 다운로드(4행) → 이력 1건
+- `docker compose up` → app·caddy 기동, 화면 3개 200
+- **Caddy를 통해** 로그인 없이 `POST /api/session` → 401(인증 게이트 동작)
+- **Caddy를 통해 실제 Supabase 상대로 전 구간**: 가입 → 로그인 → 업로드 → 검토(정상) →
+  모드 B 취합 → 결과 다운로드(4,961바이트). 테스트 계정은 정리했습니다
 
-실제 Cloud Run 배포는 계정·결제가 필요해 실행하지 않았습니다.
+실제 오라클 VM 배포는 계정이 필요해 실행하지 않았습니다.
 
-## 대안 (같은 Dockerfile을 씁니다)
+## 알아둘 한계
 
-| | 비용 | 잠듦 | 비고 |
-|---|---|---|---|
-| **Fly.io** (`fly.toml` 있음) | 월 약 $5.92 | 안 잠듦 | 도쿄. `fly deploy` 한 줄. CPU 조임 문제가 없습니다 |
-| **Render** | 무료 | 15분 유휴 | 512MB(30개 취합 실측 최대 RSS 378MB라 빠듯), 리전이 멉니다 |
-| **Oracle Cloud Always Free** | 무료 | 안 잠듦 | 서울 리전. VM을 직접 관리해야 합니다(도커·TLS·재시작) |
+- **재시작하면 진행 중이던 작업이 사라집니다**(`docker compose up -d --build`로 갱신할 때도
+  마찬가지). 기록과 산출물은 Supabase에 남고, 업로드 세션·잡 진행률만 사라집니다.
+- **복제하지 마세요**(`docker compose up --scale app=2` 금지). 세션이 메모리에 있는 한
+  인스턴스 1개가 구조적 상한입니다.
+- 업로드 상한은 파일당 50MB·합계 500MB이고 Admin 화면에서 바꿉니다. Caddy의 요청 본문
+  상한(`Caddyfile`의 `max_size 500MB`)도 함께 맞춰야 합니다.
+- Supabase 무료 플랜은 오래 안 쓰면 프로젝트가 일시정지됩니다. 발표 전에 한 번 접속해
+  깨워두세요.

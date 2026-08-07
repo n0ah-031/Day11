@@ -1,0 +1,24 @@
+# SITE_ADDRESS가 도메인이면 Caddy가 Let's Encrypt 인증서를 자동으로 받아 갱신한다.
+# `:80`이면 HTTP로만 뜬다(그때는 docker-compose의 COOKIE_SECURE를 0으로 내려야 로그인이 된다).
+{$SITE_ADDRESS} {
+	# 업로드가 파일당 50MB·합계 500MB다. 기본값(10MB 안팎)이면 큰 업로드가 413으로 막힌다
+	request_body {
+		max_size 500MB
+	}
+
+	# 2단계 AI 재검증이 파일당 20초대다. 30개 규모면 응답을 오래 기다린다
+	reverse_proxy app:8080 {
+		transport http {
+			read_timeout 20m
+			write_timeout 20m
+		}
+	}
+
+	encode gzip
+	log {
+		output file /data/access.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+	}
+}
