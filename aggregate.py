@@ -1168,21 +1168,51 @@ def _write_block(ws, headers: list[str], rows: list[list], start_row: int) -> in
     return start_row
 
 
-def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_cols: list[str]):
+def _format_for(entries, template_path) -> xf.FormatTemplate:
+    """출력 시트 하나의 기준 서식. 규칙 1(등록 양식) → 규칙 2(전 파일 다수결).
+
+    다수결에 넣는 순서는 파일명 오름차순이다 — 동수일 때 첫 파일이 이기게 하려면
+    순서가 결정적이어야 한다.
+    """
+    if template_path:
+        for _, sheet in entries:
+            tpl = xf.capture(template_path, sheet.name, sheet.header_row)
+            if tpl:
+                tpl.source_label = f"등록 양식 '{sheet.name}'"
+                return tpl
+    caps = [xf.capture(uf.path, sheet.name, sheet.header_row)
+            for uf, sheet in sorted(entries, key=lambda e: e[0].name)]
+    return xf.consensus(caps) or xf.basic()
+
+
+def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_cols: list[str],
+               all_files: list[UploadedFile] | None = None, template_path=None):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     used: set[str] = set()
     notes: list[str] = []
+    labels: list[str] = []           # 시트마다 쓴 기준 서식 — 개요·안내에 밝힌다
+    total_rows = 0
 
     if mode == "A":
-        # 원본 보존형: {부서명}_{원본시트명} 시트 n×m개
         for uf in files:
             for sheet in uf.sheets:
                 ws = wb.create_sheet(_safe_sheet_name(f"{uf.dept}_{sheet.name}", used))
-                _write_block(ws, sheet.headers, sheet.rows, 1)
-                # 헤더가 1행으로 당겨지므로 제목행이 있던 만큼 이미지도 위로 올라간다
-                _add_images(ws, sheet, _row_offset(sheet, 2))
-        return wb, notes
+                # 모드 A는 원본 보존형이라 규칙 1·2를 타지 않는다 — 각 시트가 자기 파일의
+                # 서식을 쓴다. 다수결로 남의 열너비를 씌우면 원본 보존이 아니게 된다
+                tpl = xf.capture(uf.path, sheet.name, sheet.header_row) or xf.basic()
+                labels.append(tpl.source_label)
+                first = xf.open_sheet(ws, tpl, sheet.headers)
+                last = _write_block(ws, [], sheet.rows, first) - 1
+                _add_images(ws, sheet, _row_offset(sheet, first))
+                xf.close_sheet(ws, tpl, sheet.headers, first, last)
+                total_rows += len(sheet.rows)
+        label = labels[0] if len(set(labels)) == 1 else f"파일별 원본 서식 {len(labels)}종"
+        notes.append(f"기준 서식: {label}")
+        run = build_summary(all_files if all_files is not None else files, files,
+                            mode, label, total_rows)
+        xf.overview_sheet(wb, 0, run)
+        return wb, notes, run
 
     # B/C/D 공통: 세로 누적. C는 그룹 단위, B/D는 시트명 단위.
     buckets: dict[str, list[tuple[UploadedFile, SheetData]]] = {}
@@ -1198,23 +1228,34 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
             buckets.setdefault(key, []).append((uf, sheet))
 
     extra = ["구분", "부서"] if mode == "C" else ["부서"]
-    dept_rows: dict[str, dict[str, tuple[int, int]]] = {}   # sheet → dept → (첫행, 마지막행)
+    dept_rows: dict[str, dict[str, tuple[int, int]]] = {}   # 시트 → 부서 → (첫행, 마지막행)
+    header_rows: dict[str, int] = {}                        # 시트 → 헤더 행(요약 수식이 참조)
 
     for key, entries in buckets.items():
         base_headers = entries[0][1].headers
         title = _safe_sheet_name(key, used)
         ws = wb.create_sheet(title)
+        tpl = _format_for(entries, template_path)
+        labels.append(tpl.source_label)
+        out_headers = extra + base_headers
+        cursor = xf.open_sheet(ws, tpl, out_headers)
+        first_data_row = cursor
+        header_rows[title] = cursor - 1
         err_ws = None
-        cursor = _write_block(ws, extra + base_headers, [], 1)
+        err_tpl = None
+        err_headers: list[str] = []
+        err_first = 0
         for uf, sheet in entries:
             if sheet.headers != base_headers:
                 # §9 모드 B 예외: 부서 간 헤더 불일치 → 오류 시트로 분리
                 if err_ws is None:
                     err_ws = wb.create_sheet(_safe_sheet_name(f"{key}_헤더불일치", used))
-                    _write_block(err_ws, ["부서", "시트"] + sheet.headers, [], 1)
+                    err_tpl = xf.capture(uf.path, sheet.name, sheet.header_row) or xf.basic()
+                    err_headers = ["부서", "시트"] + sheet.headers
+                    err_first = xf.open_sheet(err_ws, err_tpl, err_headers)
                 notes.append(f"'{uf.dept}'의 '{sheet.name}' 시트 헤더가 기준과 달라 '{err_ws.title}' 시트로 분리했습니다.")
                 rows = [[uf.dept, sheet.name] + list(r) for r in sheet.rows]
-                _write_block(err_ws, [], rows, err_ws.max_row + 1)
+                _write_block(err_ws, [], rows, max(err_ws.max_row + 1, err_first))
                 continue
             prefix = [sheet.name, uf.dept] if mode == "C" else [uf.dept]
             rows = [prefix + list(r) for r in sheet.rows]
@@ -1224,13 +1265,23 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
                 dept_rows.setdefault(title, {})[uf.dept] = (first, cursor - 1)
             # extra(구분·부서)가 앞에 끼므로 이미지도 그만큼 오른쪽으로 밀어야 한다
             _add_images(ws, sheet, _row_offset(sheet, first), col_offset=len(extra))
+        total_rows += cursor - first_data_row
+        xf.close_sheet(ws, tpl, out_headers, first_data_row, cursor - 1)
+        if err_ws is not None:
+            xf.close_sheet(err_ws, err_tpl, err_headers, err_first, err_ws.max_row)
 
     if mode == "D":
-        _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes)
-    return wb, notes
+        _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes, header_rows)
+
+    label = labels[0] if len(set(labels)) == 1 else f"시트별 기준 서식 {len(set(labels))}종"
+    notes.append(f"기준 서식: {label}")
+    run = build_summary(all_files if all_files is not None else files, files,
+                        mode, label, total_rows)
+    xf.overview_sheet(wb, 0, run)     # 결과 파일만 받아도 무엇이 빠졌는지 보이게
+    return wb, notes, run
 
 
-def _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes) -> None:
+def _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes, header_rows) -> None:
     """종합요약 시트를 최상단에 추가. 수치는 SUMIF 수식 기반(하드코딩 금지, §9)."""
     ws = wb.create_sheet("종합요약", 0)
     ws.cell(row=1, column=1, value="부서")
@@ -1243,7 +1294,10 @@ def _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes) -> None
             terms = []
             for title, ranges in dept_rows.items():
                 target = wb[title]
-                headers = [target.cell(row=1, column=i).value for i in range(1, target.max_column + 1)]
+                # 제목 블록을 복원하면서 헤더가 1행이 아니게 됐다 — 시트마다 실제 헤더 행을 본다
+                hr = header_rows.get(title, 1)
+                headers = [target.cell(row=hr, column=i).value
+                           for i in range(1, target.max_column + 1)]
                 if col not in headers or dept not in ranges:
                     continue
                 value_letter = get_column_letter(headers.index(col) + 1)
@@ -1256,6 +1310,7 @@ def _add_summary_sheet(wb, files, summary_cols, dept_rows, extra, notes) -> None
             else:
                 ws.cell(row=r, column=c, value="N/A")     # §9 지정 컬럼 부재 시
                 notes.append(f"요약 지표 '{col}'을(를) 찾을 수 없어 '{dept}' 행에 N/A로 표기했습니다.")
+    xf.close_sheet(ws, xf.basic(), ["부서"] + list(summary_cols), 2, ws.max_row)
 
 
 def _reason_of(uf: UploadedFile) -> str:
@@ -1403,7 +1458,7 @@ def main(argv=None) -> int:
     for uf in selected:
         preprocess(uf)
 
-    wb, notes = synthesize(selected, args.mode, group_map, summary_cols)
+    wb, notes, run = synthesize(selected, args.mode, group_map, summary_cols, all_files=files)
     wb.save(args.out)
     write_report(files, Path(args.report))
 

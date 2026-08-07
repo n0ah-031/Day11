@@ -128,23 +128,24 @@ def test_synthesis_modes(tmp: Path):
         ag.review_stage1(uf, rules={})
         files.append(uf)
 
-    wb, _ = ag.synthesize(files, "A", {}, [])
-    assert len(wb.sheetnames) == 4, wb.sheetnames                 # n×m = 2×2
+    wb, _, _ = ag.synthesize(files, "A", {}, [])
+    assert len(wb.sheetnames) == 5, wb.sheetnames                 # 취합 개요 1 + n×m = 2×2
     assert "기획부_예산" in wb.sheetnames, wb.sheetnames
 
-    wb, _ = ag.synthesize(files, "B", {}, [])
-    assert sorted(wb.sheetnames) == ["예산", "인원"], wb.sheetnames  # m = 2
+    wb, _, _ = ag.synthesize(files, "B", {}, [])
+    assert sorted(wb.sheetnames) == ["예산", "인원", "취합 개요"], wb.sheetnames  # m = 2 + 취합 개요
     ws = wb["예산"]
-    assert ws.cell(row=1, column=1).value == "부서", "부서 구분 컬럼이 추가돼야 한다"
-    assert ws.max_row == 5, ws.max_row                            # 헤더 1 + (2+2) 행
+    # 헤더는 1행이 아니라 원본 자리(3행: 제목1 + 공백2 다음)로 복원된다
+    assert ws.cell(row=3, column=1).value == "부서", "부서 구분 컬럼이 추가돼야 한다"
+    assert ws.max_row == 7, ws.max_row                # 제목 2 + 헤더 1 + 데이터 (2+2) 행
 
-    wb, notes = ag.synthesize(files, "C", {"예산": "재정"}, [])
-    assert sorted(wb.sheetnames) == ["미분류", "재정"], wb.sheetnames  # k = 2, 인원→미분류
+    wb, notes, _ = ag.synthesize(files, "C", {"예산": "재정"}, [])
+    assert sorted(wb.sheetnames) == ["미분류", "재정", "취합 개요"], wb.sheetnames  # k = 2 + 취합 개요, 인원→미분류
     assert any("미분류" in n for n in notes), notes
-    assert wb["재정"].cell(row=1, column=1).value == "구분", "원 시트명 컬럼이 추가돼야 한다"
+    assert wb["재정"].cell(row=3, column=1).value == "구분", "원 시트명 컬럼이 추가돼야 한다"
 
-    wb, _ = ag.synthesize(files, "D", {}, ["예산액"])
-    assert wb.sheetnames[0] == "종합요약", wb.sheetnames           # m+1, 최상단
+    wb, _, _ = ag.synthesize(files, "D", {}, ["예산액"])
+    assert wb.sheetnames[:2] == ["취합 개요", "종합요약"], wb.sheetnames  # 취합 개요가 맨 앞, 종합요약이 그 다음
     formula = wb["종합요약"].cell(row=2, column=2).value
     assert isinstance(formula, str) and formula.startswith("=SUMIF"), formula  # 하드코딩 금지
     print("  ✓ 합성 모드 A/B/C/D 시트 구성 + 모드 D 수식 기반 요약")
@@ -195,18 +196,19 @@ def test_image_anchor_relocation(tmp: Path):
         files.append(uf)
     assert files[0].sheets[0].images, "원본 이미지를 읽어야 한다"
 
-    # 모드 A: 헤더가 1행으로 당겨지므로 데이터 첫 행은 2행. 컬럼은 그대로 D(4).
-    wb, _ = ag.synthesize(files, "A", {}, [])
+    # 모드 A: 원본 서식이 복원되어 헤더가 원래 자리(3행)로 돌아가므로
+    # 데이터 첫 행도 원래 자리(4행)다. 컬럼은 그대로 D(4).
+    wb, _, _ = ag.synthesize(files, "A", {}, [])
     got = placed(wb, "A")
-    assert got["기획부_실적"] == [(2, 4, (96, 72))], got
+    assert got["기획부_실적"] == [(4, 4, (96, 72))], got
 
     # 모드 B: '부서' 컬럼이 앞에 끼므로 증빙사진은 D→E(5). 행은 파일별 시작 행.
-    wb, _ = ag.synthesize(files, "B", {}, [])
-    assert placed(wb, "B")["실적"] == [(2, 5, (96, 72)), (4, 5, (96, 72))], placed(wb, "B")
+    wb, _, _ = ag.synthesize(files, "B", {}, [])
+    assert placed(wb, "B")["실적"] == [(4, 5, (96, 72)), (6, 5, (96, 72))], placed(wb, "B")
 
     # 모드 C: '구분'+'부서' 2개가 끼므로 D→F(6).
-    wb, _ = ag.synthesize(files, "C", {"실적": "상반기"}, [])
-    assert placed(wb, "C")["상반기"] == [(2, 6, (96, 72)), (4, 6, (96, 72))], placed(wb, "C")
+    wb, _, _ = ag.synthesize(files, "C", {"실적": "상반기"}, [])
+    assert placed(wb, "C")["상반기"] == [(4, 6, (96, 72)), (6, 6, (96, 72))], placed(wb, "C")
     print("  ✓ 이미지 anchor 재배치(행·열 추종 + 표시 크기 보존)")
 
 
@@ -282,11 +284,11 @@ def test_real_form_structure(tmp: Path):
     assert ag._pick_key_column(sheet.headers, sheet.rows) == 2, sheet.headers
 
     # 합계 행이 취합에 섞이면 모드 B/D에서 이중 계상된다
-    result, _ = ag.synthesize([uf], "B", {}, [])
+    result, _, _ = ag.synthesize([uf], "B", {}, [])
     body = result["2025년 대상 리스트"]
-    assert body.max_row == 4, body.max_row          # 헤더 1 + 데이터 3
+    assert body.max_row == 7, body.max_row          # 제목 3(제목·공백·안내) + 헤더 1 + 데이터 3
     assert all(str(body.cell(row=r, column=2).value).replace(" ", "") not in ("합계", "계")
-               for r in range(2, body.max_row + 1))
+               for r in range(5, body.max_row + 1))
     print("  ✓ 실제 업무 양식 구조(안내 시트·세로 병합·합계·각주 행)")
 
 
@@ -469,7 +471,8 @@ def test_cli_end_to_end(tmp: Path):
     assert code == 0, code
     assert out.exists() and report.exists()
     ws = openpyxl.load_workbook(out)["예산"]
-    depts = {ws.cell(row=r, column=1).value for r in range(2, ws.max_row + 1)}
+    # 헤더가 원본 자리(3행: 제목1 + 공백2 다음)로 복원되므로 데이터는 4행부터다
+    depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
     assert depts == {"기획부"}, f"오류 파일은 기본 제외돼야 한다: {depts}"
     rep = openpyxl.load_workbook(report)
     assert rep.sheetnames == ["오류 목록", "자동교정 이력"], rep.sheetnames
@@ -480,7 +483,7 @@ def test_cli_end_to_end(tmp: Path):
                     "--out", str(out), "--report", str(report)])
     assert code == 0
     ws = openpyxl.load_workbook(out)["예산"]
-    depts = {ws.cell(row=r, column=1).value for r in range(2, ws.max_row + 1)}
+    depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
     assert depts == {"기획부", "총무부"}, depts
     print("  ✓ CLI end-to-end(기본 제외 / 강제 포함)")
 
@@ -531,8 +534,8 @@ def test_pivot_flatten(tmp: Path):
     assert len(flat.headers) == 6, flat.headers                  # 3개월 × 2지표, 합계 행 제외
 
     # 시트명이 달랐던 두 파일이 모드 B에서 한 시트 2행으로 합쳐진다
-    wb, _notes = ag.synthesize(files, "B", {}, [])
-    assert wb.sheetnames == [ag.PIVOT_SHEET_NAME], wb.sheetnames
+    wb, _notes, _run = ag.synthesize(files, "B", {}, [])
+    assert wb.sheetnames == [xf.OVERVIEW_SHEET, ag.PIVOT_SHEET_NAME], wb.sheetnames
     ws = wb[ag.PIVOT_SHEET_NAME]
     assert ws.max_row == 3 and ws.max_column == 7, (ws.max_row, ws.max_column)
     assert [c.value for c in ws[1]][:3] == ["부서", "1월 신고", "1월 조치"]
@@ -794,6 +797,71 @@ def test_format_apply(tmp: Path):
     print("  ✓ 서식 적용(제목 블록·헤더 자리·필터/인쇄영역 재계산·기본서식·날짜 폴백·중간 실패 되돌리기·스타일 실패해도 재계산 진행)")
 
 
+def test_synthesis_inherits_format(tmp: Path):
+    """모드 B·C·D가 원본 양식의 서식을 이어받고, 열 오프셋만큼 밀어서 맞춘다."""
+    files = []
+    for dept in ("대구", "용인"):
+        path = tmp / f"{dept}.xlsx"
+        _styled_form(path)
+        uf = ag.read_file(path)
+        uf.dept = dept
+        files.append(uf)
+
+    wb, notes, run = ag.synthesize(files, "B", {}, [], all_files=files)
+    ws = wb["대상 리스트"]
+
+    # 제목 블록이 살아 있고 헤더는 원본 자리(4행), 앞에 부서 1칸
+    assert ws["A1"].value == "2025년 집중안전점검 리스트"
+    assert ws.cell(row=4, column=1).value == "부서"
+    assert ws.cell(row=4, column=2).value == "지사"
+    assert ws.cell(row=4, column=1).font.bold is True
+    assert ws.cell(row=5, column=1).value == "대구"
+    assert ws.column_dimensions["B"].width == 16.2        # 지사 = 원본 A열 너비
+    assert ws.auto_filter.ref == "A4:E6"                  # 2행이 쌓였다
+    assert ws.print_title_rows == "$1:$4"
+    assert run.aggregated == 2 and run.result_rows == 2
+    assert "공통 서식" in run.source_label
+    assert any("기준 서식" in n for n in notes)           # 화면 안내로도 나간다
+
+    # 모드 C는 구분·부서 2칸이 앞에 낀다
+    wb_c, _, _ = ag.synthesize(files, "C", {"대상 리스트": "상반기"}, [], all_files=files)
+    ws_c = wb_c["상반기"]
+    assert [ws_c.cell(row=4, column=c).value for c in range(1, 4)] == ["구분", "부서", "지사"]
+    assert ws_c.column_dimensions["C"].width == 16.2      # 지사가 2칸 밀렸다
+
+    # 개요 시트가 결과 파일 맨 앞에 붙는다 — 결과만 받아도 누락이 보이게
+    assert wb.sheetnames == ["취합 개요", "대상 리스트"]
+
+    # 모드 D 종합요약은 헤더가 1행이 아니라 원본 헤더 행에 있는 시트를 참조해야 한다
+    wb_d, _, _ = ag.synthesize(files, "D", {}, ["온도차"], all_files=files)
+    assert wb_d.sheetnames[:2] == ["취합 개요", "종합요약"]
+    formula = wb_d["종합요약"].cell(row=2, column=2).value
+    # 부서(A열) 기준으로 온도차(E열)를 참조해야 한다 — 4행 헤더 아래(5행) 데이터
+    assert formula.startswith("=SUMIF(") and "!A5:A5" in formula and "!E5:E5" in formula
+    assert "#REF" not in formula
+
+    # 규칙 1: 양식을 주면 다수결하지 않고 그 파일의 서식을 쓴다
+    tmpl = tmp / "배포양식.xlsx"
+    _styled_form(tmpl)
+    wb0 = openpyxl.load_workbook(tmpl)
+    wb0["대상 리스트"].column_dimensions["A"].width = 99.0
+    wb0.save(tmpl)
+    wb_t, _, run_t = ag.synthesize(files, "B", {}, [], all_files=files, template_path=tmpl)
+    assert wb_t["대상 리스트"].column_dimensions["B"].width == 99.0   # 회신본 16.2가 아니다
+    assert "등록 양식" in run_t.source_label
+
+    # 폴백: 원본을 못 열어도 값은 전부 나온다 (서식은 부가물이다)
+    for uf in files:
+        uf.path = tmp / f"사라진_{uf.path.name}"
+    wb_f, _, run_f = ag.synthesize(files, "B", {}, [], all_files=files)
+    ws_f = wb_f["대상 리스트"]
+    assert ws_f.cell(row=1, column=1).value == "부서"        # 기본서식은 헤더가 1행
+    assert ws_f.cell(row=2, column=1).value == "대구"
+    assert ws_f.cell(row=1, column=1).font.bold is True
+    assert run_f.source_label == "기본서식"
+    print("  ✓ 합성 서식 상속(모드 B·C 오프셋·모드 D 요약 참조 행·양식 우선·폴백)")
+
+
 def test_overview_summary(tmp: Path):
     """결과 파일이 '무엇이 빠졌는지'를 스스로 말한다.
 
@@ -857,6 +925,7 @@ def main() -> int:
                    test_format_consensus,
                    test_format_apply,
                    test_overview_summary,
+                   test_synthesis_inherits_format,
                    test_cli_end_to_end):
             sub = tmp / fn.__name__
             sub.mkdir()
