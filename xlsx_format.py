@@ -224,7 +224,7 @@ def consensus(templates: list) -> FormatTemplate | None:
     return out
 
 
-def open_sheet(ws, tpl: FormatTemplate, col_offset: int, out_headers: list) -> int:
+def open_sheet(ws, tpl: FormatTemplate, out_headers: list) -> int:
     """제목 블록과 헤더 값을 쓰고 데이터 시작 행을 돌려준다.
 
     제목 블록은 열 오프셋을 적용하지 않는다 — 문서 제목은 표의 컬럼이 아니라
@@ -248,7 +248,12 @@ def open_sheet(ws, tpl: FormatTemplate, col_offset: int, out_headers: list) -> i
             ws.cell(row=header_row, column=c, value=name)
         return header_row + 1
     except Exception:
-        # 제목 블록을 못 쓰면 헤더만 1행에 놓고 진행한다. 값은 나와야 한다
+        # 제목 블록이 반쯤 쓰인 채로 남으면 "헤더 1행, 데이터 2행부터"라는 폴백의
+        # 전제가 깨진다 — 이미 쓴 병합·값을 되돌려 진짜 빈 시트에서 다시 시작한다
+        for rng in list(ws.merged_cells.ranges):
+            ws.unmerge_cells(str(rng))
+        if ws.max_row:
+            ws.delete_rows(1, ws.max_row)
         for c, name in enumerate(out_headers, start=1):
             ws.cell(row=1, column=c, value=name)
         return 2
@@ -278,11 +283,14 @@ def close_sheet(ws, tpl: FormatTemplate, out_headers: list, first_data_row: int,
 
     자동필터 범위와 인쇄영역은 원본 값을 쓰지 않고 **결과 행수로 재계산**한다.
     회신본마다 데이터 행수가 달라 원본 값(A4:H63 등)은 결과와 무관하기 때문이다.
-    """
-    try:
-        header_row = tpl.header_row
-        last_row = max(last_row, header_row)
 
+    스타일 적용과 필터/인쇄영역 재계산을 별도 try로 나눈다 — 필터·인쇄영역
+    재계산은 장식이 아니라 결함 수정이라, 서식 적용이 실패해도 반드시 돈다.
+    """
+    header_row = tpl.header_row
+    last_row = max(last_row, header_row)
+
+    try:
         if tpl.header_style is not None:
             for c in range(1, len(out_headers) + 1):
                 tpl.header_style.put(ws.cell(row=header_row, column=c))
@@ -305,7 +313,10 @@ def close_sheet(ws, tpl: FormatTemplate, out_headers: list, first_data_row: int,
             if width is None:
                 width = _fit_width(ws, c, header_row, last_row)
             ws.column_dimensions[get_column_letter(c)].width = width
+    except Exception:
+        pass
 
+    try:
         last_col = get_column_letter(max(len(out_headers), 1))
         ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
         ws.auto_filter.ref = f"A{header_row}:{last_col}{last_row}"

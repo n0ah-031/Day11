@@ -681,7 +681,7 @@ def test_format_apply(tmp: Path):
     wb = openpyxl.Workbook()
     ws = wb.active
     out_headers = ["부서", "지사", "개소", "점검일시", "온도차"]   # 앞에 부서 1칸
-    first = xf.open_sheet(ws, tpl, 1, out_headers)
+    first = xf.open_sheet(ws, tpl, out_headers)
     assert first == 5                     # 헤더가 원본과 같은 4행 → 데이터는 5행부터
 
     rows = [["대구", "대구", 2, "2025-01-08", 3.3],
@@ -707,7 +707,7 @@ def test_format_apply(tmp: Path):
     assert ws.cell(row=5, column=4).number_format == "mm-dd-yy"     # 점검일시
     assert ws.cell(row=5, column=3).number_format == "0_);[Red]\\(0\\)"   # 개소
 
-    # 열너비: 오프셋만큼 밀려서 헤더 이름대로 붙는다. 부서 열은 값 길이에 맞춘다
+    # 열너비: 앞에 낀 부서 컬럼만큼 밀려도 헤더 이름으로 제 컬럼을 찾는다. 부서 열은 값 길이에 맞춘다
     assert ws.column_dimensions["B"].width == 16.2     # 지사
     assert ws.column_dimensions["D"].width == 30.8     # 점검일시
     assert xf.MIN_WIDTH <= ws.column_dimensions["A"].width <= xf.MAX_WIDTH
@@ -724,7 +724,7 @@ def test_format_apply(tmp: Path):
     wb2 = openpyxl.Workbook()
     ws2 = wb2.active
     b = xf.basic()
-    f2 = xf.open_sheet(ws2, b, 0, ["가", "나"])
+    f2 = xf.open_sheet(ws2, b, ["가", "나"])
     assert f2 == 2
     ws2.cell(row=2, column=1, value="x")
     ws2.cell(row=2, column=2, value="y")
@@ -739,7 +739,7 @@ def test_format_apply(tmp: Path):
     wb3 = openpyxl.Workbook()
     ws3 = wb3.active
     b3 = xf.basic()
-    f3 = xf.open_sheet(ws3, b3, 0, ["점검일", "메모"])
+    f3 = xf.open_sheet(ws3, b3, ["점검일", "메모"])
     ws3.cell(row=f3, column=1, value=_dt.datetime(2025, 1, 8))
     ws3.cell(row=f3, column=2, value="글자")
     xf.close_sheet(ws3, b3, ["점검일", "메모"], f3, f3)
@@ -752,11 +752,46 @@ def test_format_apply(tmp: Path):
     tpl4 = xf.capture(src, "대상 리스트", 4)
     tpl4.number_formats.pop("점검일시")          # 그 컬럼만 상속 실패한 상황
     h4 = ["지사", "개소", "점검일시", "온도차"]
-    f4 = xf.open_sheet(ws4, tpl4, 0, h4)
+    f4 = xf.open_sheet(ws4, tpl4, h4)
     ws4.cell(row=f4, column=3, value=_dt.datetime(2025, 1, 8))
     xf.close_sheet(ws4, tpl4, h4, f4, f4)
     assert ws4.cell(row=f4, column=3).number_format == "mm-dd-yy"
-    print("  ✓ 서식 적용(제목 블록·헤더 자리·열 오프셋·필터/인쇄영역 재계산·기본서식·날짜 폴백)")
+
+    # 제목 블록을 쓰다 중간에 실패하면(잘못된 병합 범위 등) 이미 쓴 값을 되돌리고
+    # 진짜 빈 시트에서 폴백해야 한다 — 안 그러면 남은 제목 텍스트 위에 데이터가 겹친다
+    bad = xf.FormatTemplate(
+        header_row=3,
+        title_rows=[
+            xf.TitleRow([(1, "2025년 리스트", xf.CellStyle())], 40),
+            xf.TitleRow([], None),
+            xf.TitleRow([(1, "※ 안내문", xf.CellStyle())], None),
+        ],
+        title_merges=[(5, 1, 1, 3)],   # min_row(5) > max_row(1) — merge_cells가 예외를 던진다
+    )
+    wb5 = openpyxl.Workbook()
+    ws5 = wb5.active
+    f5 = xf.open_sheet(ws5, bad, ["가", "나"])
+    assert f5 == 2                                          # 헤더 1행 → 데이터 2행부터
+    assert [ws5.cell(row=1, column=c).value for c in (1, 2)] == ["가", "나"]
+    # 헤더 두 칸을 뺀 나머지 어디에도 제목·안내 텍스트가 남아 있지 않다
+    assert ws5.max_row == 1 and ws5.max_column == 2
+    assert not list(ws5.merged_cells.ranges)                # 남은 병합도 없다
+
+    # 스타일링(열너비 등)이 실패해도 필터·인쇄영역 재계산은 반드시 돈다 —
+    # 장식(서식)과 결함 수정(필터·인쇄영역)을 한 try에 묶으면 안 되는 이유
+    tpl6 = xf.FormatTemplate(header_row=1)
+    tpl6.widths["가"] = "abc"                 # 폭 대입에서 TypeError를 일으킨다
+    wb6 = openpyxl.Workbook()
+    ws6 = wb6.active
+    h6 = ["가", "나"]
+    f6 = xf.open_sheet(ws6, tpl6, h6)
+    ws6.cell(row=f6, column=1, value=1)
+    ws6.cell(row=f6, column=2, value=2)
+    xf.close_sheet(ws6, tpl6, h6, f6, f6)
+    assert ws6.auto_filter.ref == "A1:B2"
+    assert ws6.freeze_panes == "A2"
+    assert ws6.print_area == "'Sheet'!$A$1:$B$2"
+    print("  ✓ 서식 적용(제목 블록·헤더 자리·필터/인쇄영역 재계산·기본서식·날짜 폴백·중간 실패 되돌리기·스타일 실패해도 재계산 진행)")
 
 
 def main() -> int:
