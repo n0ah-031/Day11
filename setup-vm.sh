@@ -4,7 +4,7 @@
 #   ssh -i <키> ubuntu@<VM_IP>
 #   curl -fsSL https://raw.githubusercontent.com/n0ah-031/Day11/claude/handoff-work-progress-f416b0/setup-vm.sh -o setup-vm.sh
 #   bash setup-vm.sh                      # HTTP로 띄운다(도메인 없을 때)
-#   bash setup-vm.sh chwihap.example.com  # 도메인이 있으면 자동 HTTPS
+#   bash setup-vm.sh kdhcmoa.example.com  # 도메인이 있으면 자동 HTTPS
 #
 # 하는 일: VM 안쪽 방화벽 열기 → 도커 설치 → 코드 받기 → 컨테이너 기동.
 # **VCN 보안 목록(콘솔)은 이 스크립트가 못 엽니다** — 콘솔에서 따로 80·443을 열어야 한다.

@@ -68,7 +68,7 @@ ssh -i <키> ubuntu@<VM_IP>
 
 curl -fsSL https://raw.githubusercontent.com/n0ah-031/Day11/claude/handoff-work-progress-f416b0/setup-vm.sh -o setup-vm.sh
 bash setup-vm.sh                       # HTTP (도메인 없을 때)
-# bash setup-vm.sh chwihap.example.com # 도메인이 있으면 자동 HTTPS
+# bash setup-vm.sh kdhcmoa.example.com # 도메인이 있으면 자동 HTTPS
 ```
 
 처음 실행하면 `.env`가 없다고 멈춥니다(키는 저장소에 없습니다 — 그게 맞습니다).
