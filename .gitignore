@@ -10,3 +10,4 @@ dist/
 *.key
 *.pem
 ssh-key-*
+.venv/

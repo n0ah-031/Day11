@@ -703,9 +703,66 @@ def test_form_recognize(client: TestClient):
         # 등록 원본은 재저작 대상이 아니다(인지 E3) — F1-7이 손대면 원본 보존이 깨진다
         locked = client.post(f"/api/form/{sid}/revise", json={"message": "항목 하나 빼줘"})
         assert locked.status_code == 400 and "등록된 원본" in locked.json()["detail"], locked.text
+
+        # ── F6-7 재인지 — 원본 양식이 개정되면 같은 양식의 새 버전으로 올린다 (인지 §5.5·J2)
+        spec2 = _form_spec()
+        spec2["fields"] = spec2["fields"][:-1]          # 개정: 항목 하나가 빠졌다
+        form2 = tmp / "zz-test 기존양식_개정.xlsx"
+        fg.materialize(_form_workbook(spec2), form2)
+        revised = form2.read_bytes()
+        headers2 = [f["name"] + ("*" if f["required"] else "") for f in spec2["fields"]]
+        recognized2 = {"form_title": spec2["form_title"], "locale": "ko",
+                       "selected_sheets": ["양식"],
+                       "fields": [dict(f, name=h, confidence="high")
+                                  for f, h in zip(spec2["fields"], headers2)]}
+        up2 = client.post("/api/form/attachments", files=[
+            ("files", (form2.name, revised, server.XLSX_MIME))])
+        assert up2.status_code == 200, up2.text
+        sid2 = up2.json()["session_id"]
+        stub.replies.append({"intent": "recognize", "reply": "확정했습니다",
+                             "spec_json": recognized2, "recognize_complete": True})
+        turn = client.post(f"/api/form/{sid2}/messages",
+                           json={"message": "개정판이야. 기존 양식의 새 버전으로 등록해줘"})
+        assert turn.status_code == 200 and turn.json()["spec_complete"] is True, turn.text
+
+        # 없는(남의) 양식 id는 존재를 알리지 않는다 / AI 생성 양식은 재인지 대상이 아니다
+        assert client.post(f"/api/form/templates/{uuid.uuid4()}/re-register",
+                           json={"session_id": sid2}).status_code == 404
+        ai_tid = store.create_form_template(project_id, sid, spec)   # source 기본값 = ai_generated
+        assert client.post(f"/api/form/templates/{ai_tid}/re-register",
+                           json={"session_id": sid2}).status_code == 400
+
+        rr = client.post(f"/api/form/templates/{template_id}/re-register",
+                         json={"session_id": sid2})
+        assert rr.status_code == 200, rr.text
+        out2 = rr.json()
+        assert out2["template_id"] == template_id and out2["version"] == 2, out2
+        row2 = store.get_form_template(template_id)
+        assert row2["version"] == 2 and row2["intake_session_id"] == sid2, row2
+        # 파일은 양식의 **원래 프로젝트** 폴더 바로 아래 평면으로 복사된다 — 새 문답의
+        # 프로젝트에는 양식 행이 없어 보관 정리에 쓸려 나가는 자리이기 때문이다
+        assert row2["file_url"].startswith(f"{project_id}/") and "_v2" in row2["file_url"], \
+            row2["file_url"]
+        assert "/" not in row2["file_url"][len(project_id) + 1:], row2["file_url"]
+        # 무변경 보증(E1)은 새 버전에도 그대로 — 내려받은 바이트가 개정본과 같아야 한다
+        dl2 = client.get(f"/api/form/template/{template_id}/download")
+        assert dl2.status_code == 200 and dl2.content == revised, (dl2.status_code, len(dl2.content))
+        assert dl2.content != original, "개정본이 아니라 옛 파일이 내려온다"
+        # 작성기준은 개정판 기준으로 갈아끼워지고, 목록은 여전히 같은 id 한 행이다
+        rules2 = client.get(f"/api/form/templates/{template_id}/rules").json()["rules"]
+        assert set(rules2) == set(headers2), rules2
+        listed2 = [t for t in client.get("/api/form/templates").json()["templates"]
+                   if t["id"] == template_id]
+        assert len(listed2) == 1 and listed2[0]["version"] == 2, listed2
+        # 이전 버전 파일은 Storage에 그대로 남는다(버전별 경로라 덮이지 않는다)
+        assert _object_of(store.FORM_BUCKET, row["file_url"])[:2] == b"PK"
+        assert store.get_intake_session(sid2)["status"] == "closed", "재등록 후 문답은 닫힌다"
+        assert client.post(f"/api/form/templates/{template_id}/re-register",
+                           json={"session_id": sid2}).status_code == 400, "두 번 등록되면 안 된다"
+
         actions = {r["action"] for r in store.list_logs(limit=50) if r["actor"] == EMP}
-        assert "양식 등록 완료" in actions, actions
-        print("  ✓ F6 인지·등록(무변경 등록·헤더 1:1·등록 대상 바꾸기·작성기준 보정)")
+        assert "양식 등록 완료" in actions and "양식 재등록 완료" in actions, actions
+        print("  ✓ F6 인지·등록(무변경 등록·헤더 1:1·등록 대상 바꾸기·작성기준 보정·재인지 v2)")
     finally:
         fg._client = real_client
         shutil.rmtree(tmp, ignore_errors=True)
@@ -883,8 +940,8 @@ def _delete_test_logs() -> None:
     base = os.environ["SUPABASE_URL"].rstrip("/")
     for action in ("테스트 행위", "계정 변경", "계정 삭제", "정책 변경", "취합 완료",
                    "한글 병합 완료", "AI 전송 동의", "양식 생성 완료",
-                   "양식 등록 완료", "양식 수정 완료", "보관 기간 정리",
-                   "작성기준 변경"):
+                   "양식 등록 완료", "양식 재등록 완료", "양식 수정 완료",
+                   "보관 기간 정리", "작성기준 변경"):
         httpx.delete(f"{base}/rest/v1/audit_logs", headers=headers, timeout=20,
                      params={"actor_id": "is.null", "action": f"eq.{action}"})
 

@@ -65,6 +65,175 @@ def test_structure_and_stage1(tmp: Path):
     print("  ✓ 구조 인식 + 1단계 규칙 검증(전량 스캔)")
 
 
+def test_default_miss_collapse(tmp: Path):
+    """기본 가정 폭주 감지(9차) — 미선언 컬럼의 누락이 임계를 넘으면 안내 1건으로 접는다.
+
+    빈 칸이 정상인 점검표(월별 매트릭스, 실측 1,051건)가 개별 누락으로 도배되는 것을
+    막되, 사용자가/양식이 선언한 기준의 누락은 몇 건이든 절대 접지 않는다.
+    """
+    # 월별 점검표 형태: 5개 월 컬럼이 대부분 비어 있다 (40행 × 5컬럼 = 검사 200칸)
+    header = ["항목", "1월", "2월", "3월", "4월", "5월"]
+    rows = [header] + [[f"활동-{i:02d}", "●" if i == 1 else None, None, None, None, None]
+                       for i in range(1, 41)]
+    path = tmp / "총무부.xlsx"
+    make_book(path, {"점검표": rows})
+
+    # ① 규칙 미지정 → 누락 199건이 아니라 '가정' 안내 1건으로 접힌다
+    uf = ag.read_file(path)
+    ag.review_stage1(uf, rules={})
+    folded = [i for i in uf.issues if i.kind == "가정"]
+    assert len(folded) == 1, [i.line() for i in uf.issues[:5]]
+    assert not any(i.reason == "필수값 누락" for i in uf.issues), \
+        "접었으면 개별 누락이 남으면 안 된다"
+    assert folded[0].grade == ag.WARN and "필수 가정 재검토" in folded[0].reason
+    assert "1월" in folded[0].reason, folded[0].reason   # 무엇을 지정할지 알려줘야 한다
+    assert uf.status == "이상", "정상으로 만들지는 않는다 — 판정은 지정 후 재검토의 몫"
+
+    # ② 같은 파일도 명시적으로 필수라 선언하면 접지 않는다(선언은 신뢰한다)
+    uf2 = ag.read_file(path)
+    ag.review_stage1(uf2, rules={h: {"required": True} for h in header})
+    misses = [i for i in uf2.issues if i.reason == "필수값 누락"]
+    assert len(misses) == 199 and not any(i.kind == "가정" for i in uf2.issues), len(misses)
+
+    # ③ 선택 입력으로 선언하면 이슈 자체가 없다(기존 동작 유지)
+    uf3 = ag.read_file(path)
+    ag.review_stage1(uf3, rules={h: {"required": False} for h in header[1:]})
+    assert not uf3.issues, [i.line() for i in uf3.issues]
+
+    # ④ 소규모 누락(하한 미만)은 지금처럼 개별 보고한다
+    small = tmp / "기획부.xlsx"
+    make_book(small, {"실적": [["사번", "부서", "예산액", "비고"],
+                              ["A01", "기획부", 1000, "정상"],
+                              ["A02", "기획부", None, "누락1"],
+                              ["A03", None, 300, "누락2"],
+                              ["A04", "기획부", 400, "정상"]]})
+    uf4 = ag.read_file(small)
+    ag.review_stage1(uf4, rules={})
+    assert sum(1 for i in uf4.issues if i.reason == "필수값 누락") == 2
+    assert not any(i.kind == "가정" for i in uf4.issues)
+
+    # ⑤ 키 가정 폭주 — 분류처럼 반복되는 첫 컬럼이 키로 잘못 가정되면 행 수만큼
+    #    충돌이 쏟아진다. 자동 판정 키일 때만 안내 1건으로 접고, 중복 행
+    #    '자동 제거' 제안도 함께 걷는다(틀린 가정으로 행을 지우면 안 된다)
+    keyed = tmp / "안전부.xlsx"
+    make_book(keyed, {"점검": [["분류", "항목", "수량"]] + [
+        [f"분류-{i // 10}", f"작업-{i // 2:02d}", 100 + (i % 5)] for i in range(40)]})
+    uf5 = ag.read_file(keyed)
+    ag.review_stage1(uf5, rules={})
+    folded5 = [i for i in uf5.issues if i.kind == "가정"]
+    assert len(folded5) == 1 and "키 가정 재검토" in folded5[0].reason, \
+        [i.line() for i in uf5.issues[:5]]
+    assert not any(i.kind in ("충돌", "중복") for i in uf5.issues)
+    assert not uf5.fixes, "접었으면 중복 자동 제거 제안도 남으면 안 된다"
+
+    # ⑥ 사용자가 키를 지정했으면 충돌이 몇 건이든 접지 않는다(선언은 신뢰한다)
+    uf6 = ag.read_file(keyed)
+    ag.review_stage1(uf6, rules={"분류": {"key": True}})
+    assert sum(1 for i in uf6.issues if i.kind == "충돌") >= 30
+    assert not any(i.kind == "가정" for i in uf6.issues)
+    print("  ✓ 기본 가정 폭주 감지(필수·키 접기, 선언 존중, 소규모 비접기)")
+
+
+def test_matrix_checklist_header(tmp: Path):
+    """월별 점검표(●표기·계층 헤더 2단·그룹 병합)의 헤더 오인식 회귀 고정 (9차).
+
+    실측 결함: 값이 전부 텍스트(●)라 '다음 행에 숫자' 규칙이 뒤로 밀리다가, 예산 숫자가
+    우연히 나오는 자리의 윗행(실적 행)이 헤더로 확정됐다. 그 뒤 데이터 구역의 그룹 병합
+    (A7:A16)을 따라 헤더 블록이 10행으로 부풀어 법령 본문이 컬럼명이 됐다.
+    """
+    path = tmp / "총무부.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "점검표"
+    ws["A1"] = "2026년 안전보건 모니터링"
+    ws.merge_cells("A1:F1")
+    # 3~4행 계층 헤더: A~C는 세로 병합, D3은 가로 병합(월 상위)
+    for col, name in (("A", "활동목표"), ("B", "세부항목"), ("C", "구분")):
+        ws[f"{col}3"] = name
+        ws.merge_cells(f"{col}3:{col}4")
+    ws["D3"] = "월별"
+    ws.merge_cells("D3:E3")
+    ws["D4"], ws["E4"], ws["F4"] = "1월", "2월", "예산"
+    # 데이터: 활동목표를 세로 병합(그룹), 계획/실적 페어, 값은 ●만. 예산 숫자는 7행에야 나온다
+    ws["A5"] = "① 준법경영"
+    ws.merge_cells("A5:A8")
+    ws["B5"] = "이행점검"
+    ws.merge_cells("B5:B6")
+    ws["C5"], ws["D5"], ws["E5"] = "계획", "●", "●"
+    ws["C6"] = "실적"
+    ws["B7"] = "법정검사"
+    ws.merge_cells("B7:B8")
+    ws["C7"], ws["D7"], ws["F7"] = "계획", "●", 250
+    ws["C8"], ws["D8"] = "실적", "●"
+    wb.save(path)
+
+    uf = ag.read_file(path)
+    sheet = uf.sheets[0]
+    assert sheet.header_row == 3, f"3행이 헤더여야 함, got {sheet.header_row}"
+    assert sheet.headers == ["활동목표", "세부항목", "구분", "월별 1월", "월별 2월", "예산"], \
+        sheet.headers
+    assert len(sheet.rows) == 4, sheet.rows
+    # 그룹 병합은 데이터 행에 채워진다
+    assert all(r[0] == "① 준법경영" for r in sheet.rows), [r[0] for r in sheet.rows]
+    print("  ✓ 월별 점검표 헤더 인식(●표기·2단 헤더·그룹 병합 회귀)")
+
+
+def test_plan_actual_pairs(tmp: Path):
+    """계획-실적 페어 검사 (9차) — 조사 기간 내 계획이 있는 달은 실적이 있어야 한다.
+
+    기간은 파일명에서 추정하고(사용자 결정), 위반은 경고로만 보고한다(미이행은 작성
+    오류가 아니라 업무 사실일 수 있다). 주관부서 컬럼이 있으면 회신 부서 행만 본다.
+    """
+    # 기간 추정부터 — 분기·범위·단독 월은 잡고, 연도 숫자는 월로 오인하지 않는다
+    assert ag._infer_period("2026년도 1분기 성과측정_총무부.xlsx") == (1, 3)
+    assert ag._infer_period("상반기 점검") == (1, 6)
+    assert ag._infer_period("1~3월 실적") == (1, 3)
+    assert ag._infer_period("10월 보고") == (10, 10)
+    assert ag._infer_period("2026년 결과보고") is None
+
+    header = ["순번", "항목", "주관부서", "구분", "1월", "2월", "3월", "4월"]
+    rows = [header,
+            [1, "점검A", "총무부", "계획", "●", "●", None, "●"],
+            [2, "점검A", "총무부", "실적", "●", None, None, None],   # 2월 미이행(4월은 기간 밖)
+            [3, "점검B", "안전부", "계획", "●", None, None, None],
+            [4, "점검B", "안전부", "실적", None, None, None, None]]  # 남의 부서 몫 — 빈 것이 정상
+    rules = {"순번": {"key": True}} | {h: {"required": False} for h in header[1:]}
+    path = tmp / "1분기 점검_총무부.xlsx"
+    make_book(path, {"점검표": rows})
+
+    # ① 파일명에서 1분기(1~3월)를 추정하고, 회신 부서(총무부) 행만 검사한다
+    uf = ag.read_file(path)
+    ag.review_stage1(uf, rules)
+    pair = [i for i in uf.issues if i.kind == "계획실적"]
+    assert uf.pair_period == (1, 3), uf.pair_period
+    assert [i.line() for i in uf.issues if i.kind != "계획실적"] == [], uf.issues
+    assert len(pair) == 1 and pair[0].grade == ag.WARN, [i.line() for i in pair]
+    assert "2월 계획이 있으나 실적이 비어" in pair[0].reason, pair[0].reason
+    assert pair[0].cell.endswith(str(uf.sheets[0].row_numbers[1])), pair[0].cell
+
+    # ② 기간을 직접 지정하면 그 값이 이긴다 (1월만 → 위반 없음)
+    uf2 = ag.read_file(path)
+    ag.review_stage1(uf2, rules, period=(1, 1))
+    assert not [i for i in uf2.issues if i.kind == "계획실적"]
+    assert uf2.pair_period == (1, 1)
+
+    # ③ 회신 부서와 맞는 행이 없으면 전체를 검사한다(조용한 전멸 방지) — 점검B 1월도 잡힘
+    other = tmp / "1분기 점검_기획부.xlsx"
+    make_book(other, {"점검표": rows})
+    uf3 = ag.read_file(other)
+    ag.review_stage1(uf3, rules)
+    assert len([i for i in uf3.issues if i.kind == "계획실적"]) == 2
+
+    # ④ 기간을 알 수 없으면 페어 검사만 조용히 건너뛴다(다른 검사는 그대로)
+    unk = tmp / "정기점검_총무부.xlsx"
+    make_book(unk, {"점검표": rows})
+    uf4 = ag.read_file(unk)
+    ag.review_stage1(uf4, rules)
+    assert uf4.pair_period is None
+    assert not [i for i in uf4.issues if i.kind == "계획실적"]
+    print("  ✓ 계획-실적 페어 검사(기간 추정·부서 스코프·경고 등급)")
+
+
 def test_clean_file_and_gating(tmp: Path):
     """위반 없는 파일은 정상, 위반 파일은 2단계 미진입(파일 단위 게이팅)."""
     clean = tmp / "총무부.xlsx"
@@ -1125,7 +1294,9 @@ def test_report_format_and_order(tmp: Path):
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
-        for fn in (test_structure_and_stage1, test_clean_file_and_gating,
+        for fn in (test_structure_and_stage1, test_default_miss_collapse,
+                   test_matrix_checklist_header, test_plan_actual_pairs,
+                   test_clean_file_and_gating,
                    test_rules_and_masking, test_synthesis_modes,
                    test_image_anchor_relocation, test_real_form_structure,
                    test_stacked_tables_and_tiered_header, test_pivot_flatten,

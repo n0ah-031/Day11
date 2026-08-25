@@ -270,6 +270,14 @@
   <div id="mode-note" class="hidden mt-3 rounded-xl border border-primary/40 bg-primary/10 px-4 py-3 text-body-sm font-body-sm"></div>
   <div id="spec" class="mt-4 text-body-sm font-body-sm text-on-surface-variant">아직 확인된 내용이 없습니다.</div>
   <div id="gaps" class="hidden mt-4 rounded-xl border border-tertiary/40 bg-tertiary/10 px-4 py-3"></div>
+  <!-- F6-7 재인지 — 원본 양식이 개정됐을 때 기존 등록 양식의 새 버전으로 올린다 (인지 §5.5·J2) -->
+  <div id="version-row" class="hidden mt-5">
+    <label class="text-body-sm font-body-sm font-semibold text-on-surface" for="version-target">등록 방식</label>
+    <select id="version-target"
+      class="w-full mt-1 px-3 py-2 rounded-lg border border-outline/40 bg-surface text-body-sm font-body-sm">
+      <option value="">새 양식으로 등록</option>
+    </select>
+  </div>
   <button id="generate" disabled title="사양이 확정되면 켜집니다"
     class="w-full mt-5 px-5 py-3 rounded-xl bg-primary text-on-primary text-label-md font-label-md font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">양식 생성</button>
   <p id="gen-hint" class="mt-2 text-body-sm font-body-sm text-on-surface-variant">사양이 확정되면 버튼이 켜집니다.</p>
@@ -488,7 +496,9 @@
     if (recognize) {
       $('mode-note').innerHTML = '첨부한 양식을 <strong>고치지 않고 그대로</strong> 등록합니다. '
         + '레이아웃·서식은 원본 그대로이고, 정하는 것은 회신본 검토에 쓸 작성기준입니다.';
+      loadVersionTargets();
     }
+    $('version-row').classList.toggle('hidden', !recognize || !state.versionTargets);
     // 의도가 모호하면 사용자가 직접 고르게 한다 — 되묻기만 하면 갇힐 수 있다(R6)
     $('branch').classList.toggle('hidden', out.intent !== 'ambiguous');
     state.complete = !!out.spec_complete;
@@ -497,6 +507,22 @@
       ? (recognize ? '항목 정보가 확정되었습니다. 등록할 수 있습니다.'
                    : '사양이 확정되었습니다. 생성할 수 있습니다.')
       : (recognize ? '항목 정보가 확정되면 버튼이 켜집니다.' : '사양이 확정되면 버튼이 켜집니다.');
+  }
+
+  // ── F6-7 재인지 대상 목록 — 등록 양식이 있을 때만 '새 버전으로 등록'을 보여준다 ──
+  // AI 생성 양식은 대상이 아니다(원본 수정은 대화형 수정 F1-7의 몫, 인지 E3).
+  async function loadVersionTargets() {
+    if (state.versionTargets !== undefined) return;   // 세션당 한 번만 불러온다
+    let list = [];
+    try {
+      const res = await fetch('/api/form/templates');
+      if (res.ok) list = ((await res.json()).templates || [])
+        .filter((t) => t.source === 'recognized_external');
+    } catch (e) { /* 목록이 없어도 새 양식 등록은 그대로 된다 */ }
+    state.versionTargets = list.length ? list : null;
+    $('version-target').innerHTML = '<option value="">새 양식으로 등록</option>'
+      + list.map((t) => `<option value="${esc(t.id)}">'${esc(t.title)}'의 새 버전(v${(t.version || 1) + 1})으로 등록</option>`).join('');
+    $('version-row').classList.toggle('hidden', state.mode !== 'recognize' || !list.length);
   }
 
   async function converse(message, label) {
@@ -539,9 +565,12 @@
     $('error').classList.add('hidden');
     if (state.mode === 'recognize') {
       // 등록은 동기다 — LLM이 파일을 저작하지 않으니 잡·폴링이 필요 없다(인지 §5.3)
-      busy(true, '양식을 등록하는 중…');
+      const target = $('version-target').value;   // 있으면 기존 양식의 새 버전(F6-7 재인지)
+      busy(true, target ? '기존 양식의 새 버전으로 등록하는 중…' : '양식을 등록하는 중…');
       try {
-        showResult(await post(`/api/form/${state.sid}/register`));
+        showResult(target
+          ? await post(`/api/form/templates/${target}/re-register`, { session_id: state.sid })
+          : await post(`/api/form/${state.sid}/register`));
       } catch (e) { fail(e.message); }
       busy(false);
       return;
@@ -563,7 +592,8 @@
   /** 미리보기 — 파일을 열지 않고 저작 결과를 그대로 표로 본다. */
   function showResult(out) {
     const registered = out.source === 'recognized_external';
-    $('result-heading').textContent = registered ? '등록 완료' : '생성 완료';
+    $('result-heading').textContent = registered
+      ? (out.version > 1 ? `등록 완료 (v${out.version})` : '등록 완료') : '생성 완료';
     $('result-title').textContent = registered
       ? `${out.form_title || '양식'} · 원본 ${out.original_name || ''} · 표 ${out.sheets.length}개`
       : `${out.form_title || '양식'} · 시트 ${out.sheets.length}개`;

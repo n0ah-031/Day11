@@ -228,6 +228,43 @@ def test_forced_include():
     print("  ✓ 강제 포함 시 forced_notice 안내")
 
 
+PAIRED = [["순번", "항목", "구분", "1월", "2월", "3월"],
+          [1, "점검A", "계획", "●", "●", None],
+          [2, "점검A", "실적", "●", None, None],       # 2월 미이행
+          [3, "점검B", "계획", "●", None, None],
+          [4, "점검B", "실적", "●", None, None]]
+
+
+def test_pair_period():
+    """계획-실적 페어 검사의 서버 배선 (9차) — period가 엔진까지 가고 응답에 실린다."""
+    sid = new_session()
+    wait(upload(sid, [("점검_총무부.xlsx", book_bytes(PAIRED))]))
+    optional = ["순번", "항목", "구분", "1월", "2월", "3월"]
+
+    # 기간을 지정하면 그 기간으로 검사하고, 응답이 실제 쓴 기간을 밝힌다
+    data = wait(client.post(f"/api/session/{sid}/review",
+                            json={"no_ai": True, "key_col": "순번",
+                                  "optional_cols": optional, "period": [1, 2]}))
+    f = data["files"][0]
+    assert f["pair_period"] == [1, 2], f
+    pair = [i for i in f["issues"] if "계획 미이행" in i["message"]]
+    assert len(pair) == 1 and "2월" in pair[0]["message"], f["issues"]
+
+    # 기간이 없고 파일명에서도 못 읽으면 페어 검사만 건너뛴다
+    data = wait(client.post(f"/api/session/{sid}/review",
+                            json={"no_ai": True, "key_col": "순번",
+                                  "optional_cols": optional}))
+    f = data["files"][0]
+    assert f["pair_period"] is None and f["issues"] == [], f
+
+    # 형식이 틀린 기간은 검토를 시작하기 전에 400으로 거른다
+    assert client.post(f"/api/session/{sid}/review",
+                       json={"no_ai": True, "period": [3, 1]}).status_code == 400
+    assert client.post(f"/api/session/{sid}/review",
+                       json={"no_ai": True, "period": ["a", 2]}).status_code == 400
+    print("  ✓ 계획-실적 검사 기간 배선(지정·미상 건너뜀·형식 검증)")
+
+
 def test_upload_rejected():
     """xlsx가 아닌 파일은 업로드 단계에서 거부된다."""
     sid = new_session()
@@ -557,7 +594,8 @@ def test_template_lookup_failure_falls_back():
 
 def main() -> int:
     # 업로드 파일은 서버가 세션별 임시 폴더에 두므로 여기서 따로 만들 것이 없다
-    for fn in (test_end_to_end, test_forced_include, test_upload_rejected, test_key_column,
+    for fn in (test_end_to_end, test_forced_include, test_pair_period,
+               test_upload_rejected, test_key_column,
                test_optional_columns, test_unreadable_stays_bad, test_dept_names,
                test_job_progress,
                test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,

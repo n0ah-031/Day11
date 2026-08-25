@@ -495,6 +495,31 @@ def register_form_template(project_id: str, session_id: str, spec: dict, file_ur
         "source": "recognized_external", "file_url": file_url})["id"]
 
 
+def put_registered_form(project_id: str, template_id: str, data: bytes, version: int) -> str:
+    """재인지한 양식 파일을 양식의 원래 프로젝트 폴더로 바이트 그대로 복사한다 (F6-7 재인지).
+
+    새 문답의 첨부 경로를 그대로 쓰지 않는 이유: 그 프로젝트에는 양식 행이 없어
+    보관 기간 정리 대상이라, 90일 뒤 등록 양식 파일이 함께 지워진다. 양식이 있는
+    프로젝트는 정리에서 빠지므로 그쪽 폴더로 옮겨 둔다. 경로 규칙은 put_form과
+    같다 — 프로젝트 폴더 바로 아래 평면, 버전별 이름(과거 버전이 덮이지 않는다).
+    """
+    path = f"{project_id}/regform_{template_id}_v{version}.xlsx"
+    _put_object(FORM_BUCKET, path, data, XLSX_MIME)
+    return path
+
+
+def reregister_form_template(template_id: str, version: int, spec: dict, file_url: str,
+                             session_id: str) -> None:
+    """F6-7 재인지 결과를 같은 행에 새 버전으로 올린다.
+
+    행을 새로 만들지 않는 이유는 revise_form_template과 같다 — 목록·취합·이력이
+    늘 최신 버전을 가리켜야 한다. 문답도 새 것으로 바꿔 단다(재인지 근거 추적).
+    """
+    _rest("PATCH", "/form_templates", params={"id": f"eq.{template_id}"},
+          json={"version": version, "spec_json": spec, "file_url": file_url,
+                "intake_session_id": session_id, "updated_at": "now()"})
+
+
 def save_field_rules(template_id: str, rows: list[dict]) -> None:
     """spec에서 파생한 작성기준을 갈아끼운다(F1-5). 재생성 시 이전 것을 남기지 않는다."""
     _rest("DELETE", "/field_rules", params={"form_template_id": f"eq.{template_id}"})

@@ -46,6 +46,15 @@ NOTE_PREFIXES = ("*", "※", "주)", "비고)", "◦", "ㅇ", "•")
 ERROR, WARN, OK = "오류", "경고", "정상"
 GRADE_ORDER = {ERROR: 2, WARN: 1, OK: 0}   # §7 대표 등급 = 최악 등급
 
+# 기본 가정(작성기준이 없는 컬럼은 필수) 폭주 감지 — 하나의 가정이 같은 유형의
+# 이슈를 시트에서 이만큼 만들어내면 데이터가 아니라 가정이 틀렸다는 신호로 본다.
+# 실측 근거: 월별 점검표(빈 칸이 정상인 매트릭스형)가 필수값 누락 1,051건으로
+# 보고돼 정작 봐야 할 칸이 묻혔다(9차). 두 조건을 모두 요구한다 — 절대치 하한은
+# 작은 표의 진짜 누락 몇십 건을 접지 않기 위해, 비율 하한은 큰 표에서 진짜
+# 누락이 수백 건인 경우(드물지만 전부 심각)를 접지 않기 위해서다.
+DEFAULT_MISS_FLOOR = 30          # 미선언 컬럼 누락이 이 건수 이상이고
+DEFAULT_MISS_RATIO = 0.3         # 미선언 컬럼 검사 칸의 이 비율 이상일 때만 접는다
+
 NUM_KEYWORDS = ("날짜", "금액", "수량", "비율", "예산", "집행", "건수", "인원",
                 "date", "amount", "count", "rate", "qty", "budget", "total")
 CODE_KEYWORDS = ("부서", "성명", "이름", "코드", "직급", "구분",
@@ -123,6 +132,7 @@ class UploadedFile:
     fixes: list[Fix] = field(default_factory=list)
     ai_unverified: bool = False      # §6.4 정상(AI 미검증)
     readable: bool = True
+    pair_period: tuple[int, int] | None = None   # 계획-실적 검사에 실제로 쓴 기간(월)
 
     @property
     def name(self) -> str:
@@ -249,7 +259,23 @@ def _looks_like_data(row: list) -> bool:
     return any(not isinstance(v, str) and not _is_blank(v) for v in row)
 
 
-def _find_header(grid: list[list]) -> int:
+HEADER_BLOCK_MAX_TIERS = 3   # 실무 계층 헤더는 2~3단이다. 이보다 두꺼우면 헤더가 아니다
+
+
+def _plausible_block(grid: list[list], hi: int,
+                     merged: list[tuple[int, int, int, int]]) -> bool:
+    """후보 행의 헤더 블록이 그럴듯한 두께인지.
+
+    ●만 찍는 월별 점검표에서 이 검사가 없으면 첫 숫자(예산 칸)가 우연히 나오는 자리의
+    윗행이 헤더로 확정되고, 데이터 구역의 그룹 병합(A7:A16 같은)을 따라 블록이 10행짜리로
+    부풀어 법령 본문이 컬럼명이 된다(실측, 9차). 진짜 계층 헤더는 2~3단을 넘지 않는다.
+    """
+    top, bottom = _header_block(grid, hi, merged)
+    return bottom - top + 1 <= HEADER_BLOCK_MAX_TIERS
+
+
+def _find_header(grid: list[list],
+                 merged: list[tuple[int, int, int, int]] = ()) -> int:
     """헤더 행 인덱스(0-base)를 찾는다. 못 찾으면 -1. (§2.2 제목행 오인식 방지)"""
     for i, row in enumerate(grid):
         filled = [v for v in row if not _is_blank(v)]
@@ -260,14 +286,15 @@ def _find_header(grid: list[list]) -> int:
         nxt = grid[i + 1] if i + 1 < len(grid) else []
         if not [v for v in nxt if not _is_blank(v)]:
             continue                      # 다음 행 공백 → 후보 제외
-        if _looks_like_data(nxt):
+        if _looks_like_data(nxt) and _plausible_block(grid, i, list(merged)):
             return i                      # 다음 행이 숫자/날짜를 보임 → 헤더 확정
     # 전 컬럼이 텍스트인 시트(숫자 없음)는 위 규칙으로 확정되지 않으므로,
     # 제목행이 아닌 첫 텍스트 행을 헤더로 채택한다.
     for i, row in enumerate(grid):
         filled = [v for v in row if not _is_blank(v)]
         if len(filled) >= 2 and all(isinstance(v, str) for v in filled):
-            if [v for v in (grid[i + 1] if i + 1 < len(grid) else []) if not _is_blank(v)]:
+            if [v for v in (grid[i + 1] if i + 1 < len(grid) else []) if not _is_blank(v)] \
+                    and _plausible_block(grid, i, list(merged)):
                 return i
     return -1
 
@@ -346,12 +373,12 @@ def _split_tables(grid: list[list], merged: list[tuple[int, int, int, int]]
     start = 0
     while start < len(grid):
         sub = grid[start:]
-        hi = _find_header(sub)
-        if hi < 0:
-            break
         # 계층 헤더는 여러 행이다. 병합으로 범위를 잡고 한 줄로 합친 뒤, 데이터는 그 아래부터.
         sub_merged = [(r0 - start, c0, r1 - start, c1) for r0, c0, r1, c1 in merged
                       if r1 - start >= 1]
+        hi = _find_header(sub, sub_merged)
+        if hi < 0:
+            break
         top, bottom = _header_block(sub, hi, sub_merged)
         headers = _compose_headers(sub, top, bottom, sub_merged)
         hi = top
@@ -792,16 +819,133 @@ def _pick_key_column(headers: list[str], rows: list[list] | None = None) -> int:
     return 0
 
 
-def review_stage1(uf: UploadedFile, rules: dict) -> None:
-    """파일 내 모든 셀을 끝까지 스캔한다(첫 위반에서 중단하지 않음, §4.1)."""
+def _short_name(name: str, limit: int = 24) -> str:
+    """안내문에 넣는 컬럼명. 계층 헤더가 뭉친 컬럼명은 수백 자라 안내문을 덮는다."""
+    flat = " ".join(str(name).split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+# ── 계획-실적 페어 검사 (9차) ─────────────────────────────────────────────────
+# 월별 점검표(계획/실적 2행 페어)의 진짜 검토 논리: 조사 기간 안에서 계획(●)이 있는
+# 달은 실적도 있어야 한다. 기간은 파일명·시트명에서 추정하되(사용자 결정: 자동 추정),
+# 화면·CLI에서 직접 지정하면 그 값을 쓴다. 추정도 지정도 없으면 검사하지 않는다 —
+# 기간을 모르는 채 전체 12개월을 검사하면 미래 달이 전부 미이행으로 오탐된다.
+PERIOD_QUARTERS = {"1분기": (1, 3), "2분기": (4, 6), "3분기": (7, 9), "4분기": (10, 12),
+                   "상반기": (1, 6), "하반기": (7, 12)}
+PAIR_PLAN, PAIR_ACTUAL = "계획", "실적"
+_MONTH_RE = re.compile(r"(\d{1,2})\s*월")
+_RANGE_RE = re.compile(r"(\d{1,2})\s*월?\s*[~\-–]\s*(\d{1,2})\s*월")
+
+
+def _infer_period(text: str) -> tuple[int, int] | None:
+    """'1분기'·'상반기'·'1~3월'·'3월' 표기에서 (시작월, 끝월)을 뽑는다. 없으면 None."""
+    for token, span in PERIOD_QUARTERS.items():
+        if token in text:
+            return span
+    m = _RANGE_RE.search(text)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if 1 <= lo <= hi <= 12:
+            return lo, hi
+    # 연도('2026년')의 숫자를 월로 오인하지 않도록 단독 월은 마지막에, 좁게 본다
+    months = [int(g) for g in _MONTH_RE.findall(text) if 1 <= int(g) <= 12]
+    if len(months) == 1:
+        return months[0], months[0]
+    return None
+
+
+def _month_columns(headers: list[str]) -> dict[int, int]:
+    """{컬럼 인덱스: 월}. '2025년 1월'처럼 합성된 계층 헤더에서도 월을 찾는다."""
+    out = {}
+    for idx, header in enumerate(headers):
+        m = _MONTH_RE.search(header or "")
+        if m and 1 <= int(m.group(1)) <= 12:
+            out[idx] = int(m.group(1))
+    return out
+
+
+def _review_plan_actual(uf: UploadedFile, sheet: SheetData,
+                        period: tuple[int, int]) -> None:
+    """계획 행에 값이 있는 조사 기간 내 달은 짝 실적 행에도 값이 있어야 한다.
+
+    구분 컬럼은 이름으로 맞히지 않는다 — 값이 계획/실적 두 가지뿐인 컬럼을 찾는다.
+    짝은 계획 행 바로 다음에 오는 실적 행이다(이 계열 양식의 고정 표기법).
+    미이행은 파일 작성 오류가 아니라 업무 사실일 수 있으므로 **경고**로 보고만 하고
+    파일을 반려(오류) 대상으로 만들지 않는다(사용자 결정, 9차).
+    """
+    months = _month_columns(sheet.headers)
+    if not months:
+        return
+    marker = None
+    for idx in range(len(sheet.headers)):
+        values = {str(r[idx]).strip() for r in sheet.rows
+                  if idx < len(r) and not _is_blank(r[idx])}
+        if values == {PAIR_PLAN, PAIR_ACTUAL}:
+            marker = idx
+            break
+    if marker is None:
+        return
+    uf.pair_period = period
+    lo, hi = period
+    # 부서별 회신 파일에는 다른 부서 몫의 행이 비어 있는 것이 정상이다(부서 1개 =
+    # 파일 1개 전제, §9). 주관부서류 컬럼이 있고 회신 부서와 맞는 행이 있으면 그
+    # 행만 검사한다. 하나도 안 맞으면 전체를 검사한다 — 조용히 다 건너뛰는 것보다
+    # 경고가 몇 건 더 뜨는 쪽이 안전하다(등급이 경고라 반려로 이어지지 않는다).
+    dept_idx = next((i for i, h in enumerate(sheet.headers)
+                     if h and ("주관부서" in h or "담당부서" in h or h.strip() == "부서")),
+                    None)
+    mine: set[int] | None = None
+    if dept_idx is not None and uf.dept:
+        matched = {i for i, row in enumerate(sheet.rows)
+                   if not _is_blank(row[dept_idx])
+                   and str(row[dept_idx]).strip() in uf.dept}
+        if matched:
+            mine = matched
+    for i, row in enumerate(sheet.rows):
+        if str(row[marker]).strip() != PAIR_PLAN:
+            continue
+        if mine is not None and i not in mine:
+            continue
+        nxt = sheet.rows[i + 1] if i + 1 < len(sheet.rows) else None
+        if nxt is None or str(nxt[marker]).strip() != PAIR_ACTUAL:
+            continue                     # 짝이 깨진 행은 판정하지 않는다(추측 금지)
+        for idx, month in months.items():
+            if not (lo <= month <= hi):
+                continue
+            if _is_blank(row[idx]) or not _is_blank(nxt[idx]):
+                continue
+            cell = f"{get_column_letter(idx + 1)}{sheet.row_numbers[i + 1]}"
+            uf.issues.append(Issue(
+                uf.name, sheet.name, cell, "계획실적", "1단계", WARN,
+                f"계획 미이행 확인 필요 — {month}월 계획이 있으나 실적이 비어 있습니다"
+                f"(검사 기간 {lo}~{hi}월)", sheet.headers[idx]))
+
+
+def review_stage1(uf: UploadedFile, rules: dict,
+                  period: tuple[int, int] | None = None) -> None:
+    """파일 내 모든 셀을 끝까지 스캔한다(첫 위반에서 중단하지 않음, §4.1).
+
+    `period`는 계획-실적 페어 검사의 조사 기간(월). 지정이 없으면 파일명에서
+    추정하고, 그래도 없으면 페어 검사만 건너뛴다(다른 검사는 그대로 돈다).
+    """
+    if period is None:
+        period = _infer_period(uf.name)
+    uf.pair_period = None                # 재검토 시 지난 판이 남지 않게 초기화
     for sheet in uf.sheets:
         sheet.col_types = classify_columns(sheet, rules)
+        default_miss: list[Issue] = []   # 미선언 컬럼(기본 가정)에서 나온 누락만 모은다
+        unruled_checked = 0              # 그 컬럼들에서 실제로 검사한 칸 수
         for idx, header in enumerate(sheet.headers):
             ctype = sheet.col_types[idx]
             if ctype == "image" or not header:
                 continue
             rule = rules.get(header, {})
             required = rule.get("required", True)
+            # 사용자가/양식이 선언한 기준에서 나온 누락은 절대 접지 않는다 —
+            # 접기는 '기본 가정이 틀렸다'는 신호에만 반응해야 한다
+            declared = header in rules
+            if not declared:
+                unruled_checked += len(sheet.rows)
             letter = get_column_letter(idx + 1)
             for i, row in enumerate(sheet.rows):
                 cell = f"{letter}{sheet.row_numbers[i]}"
@@ -812,8 +956,11 @@ def review_stage1(uf: UploadedFile, rules: dict) -> None:
                     # 보고하지 않는다. 담당자가 조치할 것이 없고, 비고처럼 대개
                     # 비워두는 컬럼에서는 행 수만큼 알림이 쌓여 리포트를 덮는다.
                     if required:
-                        uf.issues.append(Issue(uf.name, sheet.name, cell, "누락", "1단계", ERROR,
-                                               "필수값 누락", header))
+                        issue = Issue(uf.name, sheet.name, cell, "누락", "1단계", ERROR,
+                                      "필수값 누락", header)
+                        uf.issues.append(issue)
+                        if not declared:
+                            default_miss.append(issue)
                     continue
                 if ctype == "numeric":
                     grade, reason, corrected = _validate_number(raw, rule)
@@ -825,17 +972,46 @@ def review_stage1(uf: UploadedFile, rules: dict) -> None:
                     if grade == WARN and corrected is not None:
                         uf.fixes.append(Fix(uf.name, sheet.name, cell, str(raw), str(corrected), reason))
 
+        # 기본 가정 폭주 감지 — 미선언 컬럼의 누락이 임계(건수·비율 모두)를 넘으면
+        # 개별 보고를 접고 '가정 재검토' 안내 1건으로 바꾼다. 빈 칸이 정상인
+        # 점검표(월별 매트릭스 등)에서 수천 건이 쏟아져 진짜 신호를 덮는 것을 막는다.
+        # 파일을 정상으로 만들지는 않는다(경고 1건 유지) — 빈 칸의 의미는 구조로
+        # 추측할 수 없으므로, 판정은 사용자가 컬럼을 지정한 뒤의 재검토가 한다.
+        if len(default_miss) >= DEFAULT_MISS_FLOOR and unruled_checked \
+                and len(default_miss) / unruled_checked >= DEFAULT_MISS_RATIO:
+            folded = {id(i) for i in default_miss}
+            uf.issues[:] = [i for i in uf.issues if id(i) not in folded]
+            cols: list[str] = []
+            for i in default_miss:
+                if i.attr and i.attr not in cols:
+                    cols.append(i.attr)
+            shown = ", ".join(_short_name(c) for c in cols[:5]) \
+                + (f" 외 {len(cols) - 5}개" if len(cols) > 5 else "")
+            uf.issues.append(Issue(
+                uf.name, sheet.name, "(해당없음)", "가정", "1단계", WARN,
+                f"필수 가정 재검토 필요 — 작성기준이 지정되지 않은 컬럼 {len(cols)}개에서 "
+                f"필수값 누락 {len(default_miss)}건이 나왔습니다(검사한 칸의 "
+                f"{len(default_miss) / unruled_checked:.0%}). 빈 칸이 정상인 점검표로 "
+                f"보여 개별 보고 대신 이 안내로 접었습니다. 키 컬럼과 선택 입력 컬럼을 "
+                f"지정한 뒤 다시 검토해주세요. 대상 컬럼: {shown}"))
+
         _review_duplicates(uf, sheet, rules)
         _review_images(uf, sheet, rules)
+        if period:
+            _review_plan_actual(uf, sheet, period)
 
 
 def _review_duplicates(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
     """동일 키 그룹핑 → 그룹 내 값 비교. 완전 중복=경고, 값 상이=충돌(오류) (§5.1)."""
     if not sheet.headers:
         return
-    key_idx = next((i for i, h in enumerate(sheet.headers) if rules.get(h, {}).get("key")),
-                   _pick_key_column(sheet.headers, sheet.rows))
+    declared_idx = next((i for i, h in enumerate(sheet.headers)
+                         if rules.get(h, {}).get("key")), None)
+    key_idx = declared_idx if declared_idx is not None \
+        else _pick_key_column(sheet.headers, sheet.rows)
     letter = get_column_letter(key_idx + 1)
+    found: list[Issue] = []
+    fixes: list[Fix] = []
     groups: dict[str, list[int]] = {}
     for i, row in enumerate(sheet.rows):
         key = row[key_idx]
@@ -849,12 +1025,32 @@ def _review_duplicates(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
         for i in indexes[1:]:
             cell = f"{letter}{sheet.row_numbers[i]}"
             if [str(v) for v in sheet.rows[i]] == first:
-                uf.issues.append(Issue(uf.name, sheet.name, cell, "중복", "1단계", WARN,
-                                       f"키 '{key}' 완전 중복 행(자동 제거 가능)", sheet.headers[key_idx]))
-                uf.fixes.append(Fix(uf.name, sheet.name, cell, f"중복 행(키 {key})", "행 제거", "완전 중복 행 자동 제거"))
+                found.append(Issue(uf.name, sheet.name, cell, "중복", "1단계", WARN,
+                                   f"키 '{key}' 완전 중복 행(자동 제거 가능)", sheet.headers[key_idx]))
+                fixes.append(Fix(uf.name, sheet.name, cell, f"중복 행(키 {key})", "행 제거", "완전 중복 행 자동 제거"))
             else:
-                uf.issues.append(Issue(uf.name, sheet.name, cell, "충돌", "1단계", ERROR,
-                                       f"키 '{key}'가 같으나 값이 상이한 행 존재", sheet.headers[key_idx]))
+                found.append(Issue(uf.name, sheet.name, cell, "충돌", "1단계", ERROR,
+                                   f"키 '{key}'가 같으나 값이 상이한 행 존재", sheet.headers[key_idx]))
+
+    # 키 가정 폭주 감지 — 자동 판정한 키에서 충돌·중복이 임계를 넘으면 개별 보고 대신
+    # '키 지정' 안내 1건으로 접는다(필수 가정 접기와 같은 원칙). 병합된 분류 컬럼이
+    # 키로 잘못 잡히면 행 수만큼 충돌이 쏟아진다(실측: 월별 점검표에서 71건).
+    # 사용자가 지정한 키에서 나온 충돌은 몇 건이든 접지 않는다. 중복 행의 '자동 제거'
+    # 제안(fixes)도 함께 걷는다 — 틀린 키 가정으로 행을 지우면 안 된다.
+    if declared_idx is None and sheet.rows \
+            and len(found) >= DEFAULT_MISS_FLOOR \
+            and len(found) / len(sheet.rows) >= DEFAULT_MISS_RATIO:
+        uf.issues.append(Issue(
+            uf.name, sheet.name, "(해당없음)", "가정", "1단계", WARN,
+            f"키 가정 재검토 필요 — 키 컬럼을 지정하지 않아 "
+            f"'{_short_name(sheet.headers[key_idx])}' 컬럼을 키로 가정했는데, 충돌·중복이 "
+            f"{len(found)}건(데이터 행의 {len(found) / len(sheet.rows):.0%}) 나왔습니다. "
+            f"분류처럼 값이 반복되는 컬럼을 키로 잘못 가정했을 가능성이 큽니다. "
+            f"개별 보고 대신 이 안내로 접었습니다 — 키 컬럼을 지정한 뒤 다시 검토해주세요.",
+            sheet.headers[key_idx]))
+        return
+    uf.issues.extend(found)
+    uf.fixes.extend(fixes)
 
 
 def _review_images(uf: UploadedFile, sheet: SheetData, rules: dict) -> None:
@@ -1424,7 +1620,18 @@ def main(argv=None) -> int:
     parser.add_argument("--pivot-sheets", default="",
                         help="월×지표 피벗표(총괄표 등) 시트명, 콤마 구분. 한 줄로 눕혀 "
                              f"'{PIVOT_SHEET_NAME}' 한 시트로 모은다")
+    parser.add_argument("--period", default=None,
+                        help="계획-실적 검사 기간(월), 예: 1-3 또는 3. 생략하면 파일명에서 "
+                             "추정('1분기'·'상반기'·'1~3월' 표기)")
     args = parser.parse_args(argv)
+
+    period = None
+    if args.period:
+        m = re.fullmatch(r"(\d{1,2})(?:\s*[~\-]\s*(\d{1,2}))?", args.period.strip())
+        if not m or not (1 <= int(m.group(1)) <= int(m.group(2) or m.group(1)) <= 12):
+            print(f"--period 형식이 잘못됐습니다: '{args.period}' (예: 1-3)", file=sys.stderr)
+            return 2
+        period = (int(m.group(1)), int(m.group(2) or m.group(1)))
 
     rules = json.loads(Path(args.rules).read_text(encoding="utf-8")) if args.rules else {}
     group_map = json.loads(Path(args.group_map).read_text(encoding="utf-8")) if args.group_map else {}
@@ -1443,7 +1650,10 @@ def main(argv=None) -> int:
                        pivot_sheets={n.strip() for n in args.pivot_sheets.split(',') if n.strip()}
                        or None)
         if uf.readable:
-            review_stage1(uf, rules)
+            review_stage1(uf, rules, period=period)
+            if uf.pair_period:
+                print(f"  · 계획-실적 검사 기간: {uf.pair_period[0]}~{uf.pair_period[1]}월"
+                      + ("" if period else " (파일명에서 추정)"))
             if uf.issues:
                 # 파일 단위 게이팅: 1단계 위반이 하나라도 있으면 2단계로 진입하지 않는다 (§4.2)
                 print("  · 1단계 위반 발견 → 2단계 AI 재검증 미진입(API 호출 절약)")

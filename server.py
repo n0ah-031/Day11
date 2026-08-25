@@ -455,6 +455,17 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
     # 비고·특이사항처럼 비워둘 수 있는 칸. 지정이 없으면 엔진 기본값(전 컬럼 필수)
     for col in (body or {}).get("optional_cols") or []:
         rules.setdefault(col, {})["required"] = False
+    # 계획-실적 검사 기간(월). 비우면 엔진이 파일명에서 추정한다(9차)
+    period = None
+    raw_period = (body or {}).get("period")
+    if isinstance(raw_period, list) and len(raw_period) == 2:
+        try:
+            lo, hi = int(raw_period[0]), int(raw_period[1])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "검사 기간은 [시작월, 끝월] 숫자여야 합니다.")
+        if not 1 <= lo <= hi <= 12:
+            raise HTTPException(400, "검사 기간이 올바르지 않습니다(1~12월, 시작≤끝).")
+        period = (lo, hi)
     # 부서명은 화면에서 고르거나 직접 입력한 값을 쓴다. 파일명은 기본값일 뿐이다
     if isinstance((body or {}).get("dept_names"), dict):
         session["dept_names"] = {str(k): v for k, v in body["dept_names"].items()}
@@ -508,7 +519,7 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
         for fid, uf in enumerate(session["files"]):
             report(f"{uf.name} 규칙 검증 중", fid, total)
             if uf.readable:
-                ag.review_stage1(uf, rules)
+                ag.review_stage1(uf, rules, period=period)
 
         # 2단계는 파일당 십수 초 걸리는 API 호출이라 한꺼번에 병렬로 돌린다.
         # 게이팅(§4.2)은 review_stage2_many가 파일 단위로 적용한다.
@@ -542,6 +553,7 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
                 "ai_unverified": uf.ai_unverified,            # §6.4 정상(AI 미검증)
                 "default_checked": uf.grade != ag.ERROR,      # §7 내부 등급 오류만 기본 해제
                 "selectable": bool(uf.readable and uf.sheets),
+                "pair_period": list(uf.pair_period) if uf.pair_period else None,  # 계획-실적 검사에 쓴 기간
                 "issues": [{"sheet": i.sheet, "cell": i.cell, "column": i.attr,
                             "message": f"{i.tag} {i.reason}"} for i in uf.issues],
             })
@@ -1058,6 +1070,60 @@ def form_register(sid: str, user: dict = User) -> dict:
         + ([f"이 파일에서 표 {len((primary['structural'].get('sheets') or []))}개를 찾아 "
             f"{len(tables)}개를 골랐습니다."]
            if len(primary["structural"].get("sheets") or []) > len(tables) else []),
+    }
+
+
+@app.post("/api/form/templates/{template_id}/re-register")
+def form_reregister(template_id: str, body: dict = Body(...), user: dict = User) -> dict:
+    """F6-7 재인지 — 원본 양식이 개정됐을 때 같은 양식의 새 버전으로 등록한다 (인지 §5.5·J2).
+
+    전용 화면 없이 등록 흐름을 새 문답(인지 모드)으로 다시 돌리고, 등록만 이 경로로
+    한다. 행을 새로 만들지 않고 version을 올린다 — 목록·취합·이력이 늘 최신 버전을
+    가리켜야 하기 때문이다(F1-7 revise와 같은 이유). 검사 항목은 register와 같다.
+    """
+    _require_consent(user)
+    session = _my_session((body or {}).get("session_id") or "", user)
+    if not store.enabled() or store.rules_of_template(user["id"], template_id) is None:
+        raise HTTPException(404, "양식을 찾을 수 없습니다.")   # 남의 것은 존재를 알리지 않는다
+    row = store.get_form_template(template_id)
+    if (row.get("source") or "ai_generated") != "recognized_external":
+        raise HTTPException(400, "AI로 생성한 양식은 대화형 수정으로 고칩니다. "
+                                 "새 버전 등록은 등록 양식 전용입니다.")
+    primary = _primary_attachment(session)
+    if primary is None:
+        raise HTTPException(400, "등록할 양식 파일이 없습니다. 개정된 xlsx 양식을 첨부해주세요.")
+    if session["status"] == "closed":
+        raise HTTPException(400, "이미 끝난 문답입니다. 새로 시작해주세요.")
+
+    spec = session.get("spec_json") or {}
+    gaps = fg.recognize_gaps(spec, primary["structural"], session["messages_json"])
+    if gaps:
+        raise HTTPException(400, "항목 정보가 아직 확정되지 않았습니다: " + ", ".join(gaps[:5]))
+
+    # 확장자 위변조 방지 — 등록 직전에 실제 바이트를 다시 본다 (인지 §7·§9.3)
+    data = store.get_object(store.FORM_BUCKET, primary["storage_path"])
+    if not data.startswith(b"PK\x03\x04"):
+        raise HTTPException(400, "양식 파일이 xlsx가 아닙니다(내용이 zip 형식이 아닙니다).")
+
+    version = (row.get("version") or 1) + 1
+    file_url = store.put_registered_form(row["project_id"], template_id, data, version)
+    store.reregister_form_template(template_id, version, spec, file_url, session["id"])
+    store.save_field_rules(template_id, fg.derive_field_rules(spec))
+    store.update_intake_session(session["id"], status="closed")
+    store.log_action(user.get("id"), "양식 재등록 완료",
+                     f"{spec.get('form_title')} · v{version} · 항목 {len(spec.get('fields') or [])}개")
+    tables = fg.selected_tables(spec, primary["structural"])
+    return {
+        "template_id": template_id,
+        "version": version,
+        "form_title": spec.get("form_title"),
+        "source": "recognized_external",
+        "original_name": primary.get("original_name"),
+        "sheets": _structure_preview(spec, primary["structural"]),
+        "rules": fg.rules_for_aggregate(spec),
+        "notes": [f"'{primary.get('original_name')}'을 고친 곳 없이 기존 양식의 "
+                  f"v{version}으로 등록했습니다. 취합·이력은 이제 이 버전을 씁니다.",
+                  f"회신받을 표: {', '.join(t.get('name') or '' for t in tables)}"],
     }
 
 
