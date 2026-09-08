@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>취합앱 유저 플로우</title>
+<style>
+:root {
+  /* design-systems/airbnb/tokens.css — pasted verbatim per token contract */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-warm: #f7f7f7;
+  --fg: #222222;
+  --fg-2: #3f3f3f;
+  --muted: #6a6a6a;
+  --meta: #929292;
+  --border: #dddddd;
+  --border-soft: #ebebeb;
+  --accent: #ff385c;
+  --accent-on: #ffffff;
+  --accent-hover: #e31c5f;
+  --accent-active: #e00b41;
+  --success: #008a05;
+  --warn: #c47700;
+  --danger: #c13515;
+  --font-display:
+    "Airbnb Cereal VF", "Airbnb Cereal App", Circular,
+    -apple-system, system-ui, "Helvetica Neue", Roboto, sans-serif;
+  --font-body:
+    "Airbnb Cereal VF", "Airbnb Cereal App", Circular,
+    -apple-system, system-ui, "Helvetica Neue", Roboto, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco,
+    Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 44px;
+  --text-4xl: 56px;
+  --leading-body: 1.43;
+  --leading-tight: 1.2;
+  --tracking-display: -0.02em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 64px;
+  --section-y-tablet: 48px;
+  --section-y-phone: 32px;
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised:
+    rgba(0, 0, 0, 0.02) 0 0 0 1px,
+    rgba(0, 0, 0, 0.04) 0 2px 6px 0,
+    rgba(0, 0, 0, 0.1) 0 4px 8px 0;
+  --focus-ring: 0 0 0 2px var(--fg);
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --container-max: 1280px;
+  --container-gutter-desktop: 40px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}
+
+* { box-sizing:border-box; margin:0; }
+html, body { background:var(--bg); }
+body{
+  font-family:var(--font-body);
+  color:var(--fg);
+  font-size:var(--text-sm);
+  font-weight:500;
+  line-height:var(--leading-body);
+  -webkit-font-smoothing:antialiased;
+}
+.page{
+  max-width:1760px;
+  margin:0 auto;
+  min-height:100svh;
+  display:grid;
+  grid-template-rows:auto 1fr;
+  gap:clamp(14px,2.2vh,26px);
+  padding:clamp(20px,3vh,36px) var(--container-gutter-desktop);
+}
+
+/* ---------- header ---------- */
+.top{ display:flex; justify-content:space-between; align-items:center; gap:32px; flex-wrap:wrap; }
+h1{
+  font-family:var(--font-display);
+  font-size:var(--text-2xl);
+  font-weight:700;
+  line-height:var(--leading-tight);
+  letter-spacing:var(--tracking-display);
+}
+.sub{ margin-top:6px; font-size:var(--text-sm); font-weight:500; color:var(--muted); }
+.top-right{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.chip{
+  display:flex; align-items:center; gap:14px;
+  border:1px solid var(--border); border-radius:var(--radius-pill);
+  padding:9px 18px; font-size:var(--text-sm); white-space:nowrap;
+}
+.chip b{ font-size:var(--text-base); font-weight:700; letter-spacing:-0.01em; }
+.cnt{ display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-weight:500; }
+.cd{ width:9px; height:9px; border-radius:50%; flex:none; }
+.cd.pass{ background:var(--success); }
+.cd.partial{ background:var(--warn); }
+.cd.fail{ background:var(--danger); }
+.btn{
+  font-family:var(--font-body); font-size:var(--text-sm); font-weight:500;
+  border-radius:var(--radius-pill); padding:10px 18px; cursor:pointer;
+  border:1px solid var(--border); background:var(--surface); color:var(--fg);
+  transition:background var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard);
+}
+.btn:hover{ background:var(--surface-warm); }
+.btn:active{ transform:scale(0.96); }
+.btn:focus-visible{ outline:none; box-shadow:var(--focus-ring); }
+.btn-primary{
+  background:var(--accent); border-color:var(--accent); color:var(--accent-on);
+  border-radius:var(--radius-sm); font-size:var(--text-base); padding:12px 22px;
+}
+.btn-primary:hover{ background:var(--accent-hover); }
+.btn-primary:active{ transform:scale(0.92); background:var(--accent-active); }
+
+/* ---------- process mini-flow ---------- */
+.process{ display:flex; align-items:center; gap:clamp(12px,1.6vw,24px); flex-wrap:wrap; }
+.p-node{ display:flex; align-items:center; gap:10px; }
+.p-dot{
+  flex:none; width:32px; height:32px; border-radius:50%;
+  background:var(--fg); color:var(--bg);
+  display:grid; place-items:center;
+  font-size:var(--text-sm); font-weight:700;
+}
+.p-text b{ display:block; font-size:var(--text-base); font-weight:600; letter-spacing:-0.01em; line-height:var(--leading-tight); }
+.p-text span{ font-size:var(--text-xs); font-weight:500; color:var(--muted); }
+.p-link{
+  width:clamp(24px,3vw,56px); height:2px; border-radius:2px;
+  background:color-mix(in srgb, var(--fg) 22%, var(--surface));
+}
+
+/* ---------- flowchart board ---------- */
+.board{ display:flex; flex-direction:column; justify-content:center; gap:clamp(14px,2.2vh,24px); min-height:0; min-width:0; overflow-x:auto; }
+.board-caption{ display:flex; justify-content:space-between; align-items:baseline; gap:16px; flex-wrap:wrap; }
+.board-caption h2{
+  font-family:var(--font-display);
+  font-size:var(--text-lg); font-weight:700; letter-spacing:-0.01em;
+}
+.caption-note{ font-size:var(--text-sm); font-weight:500; color:var(--muted); }
+
+.flow{
+  --node-w:clamp(164px, 10.5vw, 186px);
+  --col-gap:clamp(20px, 1.5vw, 26px);
+  --row-gap:20px;
+  --line-c:color-mix(in srgb, var(--fg) 26%, var(--surface));
+  position:relative;
+  display:flex; align-items:center; gap:var(--col-gap);
+  width:fit-content; max-width:100%; margin:0 auto;
+  padding:8px 4px;
+}
+.flow-col{ display:flex; flex-direction:column; gap:var(--row-gap); position:relative; z-index:1; }
+.flow-edges{ position:absolute; left:0; top:0; width:100%; height:100%; z-index:0; pointer-events:none; overflow:visible; }
+.flow-edges .edge{ fill:none; stroke:var(--line-c); stroke-width:2.5; }
+.flow-edges .edge-head{ fill:var(--line-c); }
+
+.box{
+  background:var(--surface);
+  border:2px solid var(--border);
+  border-radius:var(--radius-sm);
+  padding:14px 16px;
+  display:flex; flex-direction:column; gap:8px;
+  width:var(--node-w); min-width:0;
+  cursor:pointer;
+  transition:border-color var(--motion-base) var(--ease-standard);
+}
+.st-pass .box{ border-color:color-mix(in srgb, var(--success) 55%, var(--surface)); }
+.st-partial .box{ border-color:color-mix(in srgb, var(--warn) 60%, var(--surface)); }
+.st-fail .box{ border-color:color-mix(in srgb, var(--danger) 50%, var(--surface)); }
+.box:focus-visible{ outline:none; box-shadow:var(--focus-ring); }
+.s-caret{ width:12px; height:12px; color:var(--meta); flex:none; margin-left:2px; transition:transform var(--motion-base) var(--ease-standard); }
+.box.open .s-caret{ transform:rotate(180deg); }
+.ops-panel{ display:none; border-top:1px solid var(--border-soft); padding-top:10px; margin-top:4px; cursor:auto; }
+.box.open .ops-panel{ display:block; animation:ops-in var(--motion-base) var(--ease-standard); }
+@keyframes ops-in{ from{ opacity:0; translate:0 -4px; } to{ opacity:1; translate:0 0; } }
+.box-top{ display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.box-top .s-tag{ margin-right:auto; }
+.s-tag{ font-size:var(--text-xs); font-weight:600; letter-spacing:0.08em; color:var(--meta); text-transform:uppercase; white-space:nowrap; }
+.pill{
+  display:inline-flex; align-items:center; gap:6px;
+  font-family:var(--font-body); font-size:var(--text-xs); font-weight:600; letter-spacing:0.02em;
+  white-space:nowrap; border:none; cursor:pointer;
+  border-radius:var(--radius-pill); padding:7px 11px;
+  transition:transform var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.pill:hover{ transform:scale(1.04); }
+.pill:active{ transform:scale(0.94); }
+.pill:focus-visible{ outline:none; box-shadow:var(--focus-ring); }
+.pill i{ width:8px; height:8px; border-radius:50%; flex:none; }
+.st-untested .pill{ background:var(--surface-warm); color:var(--muted); }
+.st-untested .pill i{ background:var(--surface); box-shadow:inset 0 0 0 1.5px var(--meta); }
+.st-pass .pill{ background:color-mix(in srgb, var(--success) 12%, var(--surface)); color:var(--fg); }
+.st-pass .pill i{ background:var(--success); }
+.st-partial .pill{ background:color-mix(in srgb, var(--warn) 14%, var(--surface)); color:var(--fg); }
+.st-partial .pill i{ background:var(--warn); }
+.st-fail .pill{ background:color-mix(in srgb, var(--danger) 12%, var(--surface)); color:var(--fg); }
+.st-fail .pill i{ background:var(--danger); }
+.s-name{
+  font-size:var(--text-base); font-weight:600; letter-spacing:-0.01em; line-height:var(--leading-tight);
+  padding:2px 6px; margin-left:-6px; border-radius:var(--radius-sm);
+}
+.s-note{
+  font-size:var(--text-sm); font-weight:500; color:var(--muted);
+  line-height:var(--leading-body); min-height:20px;
+  padding:2px 6px; margin-left:-6px; border-radius:var(--radius-sm);
+}
+.s-note:empty::before{ content:attr(data-ph); color:var(--meta); }
+
+/* ---------- background operations ---------- */
+.ops{ display:flex; flex-direction:column; }
+.ops-head{ display:flex; align-items:center; justify-content:space-between; gap:6px; }
+.ops-label{ font-size:var(--text-xs); font-weight:600; letter-spacing:0.02em; color:var(--meta); }
+.ops-add{
+  flex:none; width:22px; height:22px; padding:0;
+  border:1px solid var(--border); background:var(--surface); color:var(--muted);
+  border-radius:var(--radius-sm); cursor:pointer; font-size:14px; line-height:1;
+  display:grid; place-items:center;
+  transition:background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+.ops-add:hover{ background:var(--surface-warm); color:var(--fg); }
+.ops-add:focus-visible{ outline:none; box-shadow:var(--focus-ring); }
+.ops-list{ list-style:none; padding:0; margin:6px 0 0; display:flex; flex-direction:column; gap:6px; }
+.op{ display:flex; align-items:flex-start; gap:7px; }
+.op-check{
+  flex:none; width:20px; height:20px; padding:0;
+  border-radius:50%; border:1.5px solid var(--border); background:var(--surface);
+  cursor:pointer; display:grid; place-items:center;
+  font-size:10px; font-weight:700; line-height:1; color:var(--bg);
+  transition:background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard);
+}
+.op-check:hover{ transform:scale(1.1); }
+.op-check:focus-visible{ outline:none; box-shadow:var(--focus-ring); }
+.op[data-st="pass"] .op-check{ background:var(--success); border-color:var(--success); }
+.op[data-st="pass"] .op-check::after{ content:"✓"; }
+.op[data-st="fail"] .op-check{ background:var(--danger); border-color:var(--danger); }
+.op[data-st="fail"] .op-check::after{ content:"✕"; font-size:9px; }
+.op-text{
+  flex:1; min-width:0; font-size:var(--text-xs); font-weight:500; color:var(--fg-2);
+  line-height:1.5; padding:1px 7px; border-radius:4px; border:1px solid transparent;
+}
+.op[data-st="pass"] .op-text{
+  background:color-mix(in srgb, var(--success) 9%, var(--surface));
+  border-color:color-mix(in srgb, var(--success) 42%, var(--surface));
+}
+.op[data-st="fail"] .op-text{
+  background:color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border-color:color-mix(in srgb, var(--danger) 40%, var(--surface));
+}
+.op-text:empty::before{ content:"동작 내용을 입력"; color:var(--meta); }
+.op-del{
+  flex:none; width:18px; height:18px; padding:0;
+  border:none; background:transparent; color:var(--meta);
+  border-radius:4px; cursor:pointer; font-size:14px; line-height:1;
+  display:grid; place-items:center; opacity:0;
+  transition:opacity var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.op:hover .op-del, .op:focus-within .op-del{ opacity:1; }
+.op-del:hover{ color:var(--danger); background:color-mix(in srgb, var(--danger) 10%, var(--surface)); }
+.op-del:focus-visible{ outline:none; box-shadow:var(--focus-ring); opacity:1; }
+
+[contenteditable]{ cursor:text; }
+[contenteditable]:focus{ outline:2px solid var(--fg); outline-offset:1px; background:var(--surface-warm); }
+
+/* ---------- legend strip ---------- */
+.legend-strip{
+  display:flex; justify-content:space-between; align-items:center; gap:16px 32px; flex-wrap:wrap;
+  background:var(--surface-warm); border-radius:var(--radius-md); padding:12px 20px;
+}
+.legend{ display:flex; align-items:center; gap:clamp(16px,2vw,32px); list-style:none; padding:0; flex-wrap:wrap; }
+.legend li{ display:flex; align-items:center; gap:8px; }
+.l-dot{ width:14px; height:14px; border-radius:50%; flex:none; }
+.l-dot.untested{ background:var(--surface); box-shadow:inset 0 0 0 2px var(--border); }
+.l-dot.pass{ background:var(--success); }
+.l-dot.partial{ background:var(--warn); }
+.l-dot.fail{ background:var(--danger); }
+.legend b{ font-size:var(--text-sm); font-weight:600; }
+.legend em{ font-style:normal; font-size:var(--text-sm); font-weight:500; color:var(--muted); }
+.hint{ font-size:var(--text-sm); font-weight:500; color:var(--muted); }
+
+@media (max-width:1000px){
+  .page{ grid-template-rows:none; }
+  .flow{ margin:0; align-items:flex-start; }
+}
+
+@media print{
+  @page{ size:A4 landscape; margin:9mm; }
+  *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .page{ min-height:0; max-width:none; padding:0; gap:10px; }
+  .actions,.hint{ display:none; }
+  .flow{ --node-w:148px; --col-gap:18px; --row-gap:10px; padding:2px 0; }
+  h1{ font-size:20px; }
+  .sub{ font-size:10px; margin-top:2px; }
+  .chip{ padding:5px 12px; gap:10px; }
+  .chip b{ font-size:12px; }
+  .cnt{ font-size:10px; }
+  .p-dot{ width:22px; height:22px; font-size:11px; }
+  .p-text b{ font-size:12px; }
+  .p-text span{ font-size:9px; }
+  .board{ gap:10px; overflow:visible; }
+  .board-caption h2{ font-size:14px; }
+  .caption-note{ font-size:9px; }
+  .box{ padding:9px 11px; gap:4px; }
+  .s-tag{ font-size:8px; }
+  .pill{ font-size:8px; padding:3px 7px; gap:4px; }
+  .pill i{ width:6px; height:6px; }
+  .s-name{ font-size:12px; padding:0 3px; margin-left:-3px; }
+  .s-note{ font-size:9px; line-height:1.35; min-height:0; padding:0 3px; margin-left:-3px; }
+  .ops-panel,.s-caret{ display:none; }
+  .flow-edges .edge{ stroke-width:2; }
+  .legend-strip{ padding:7px 14px; border-radius:10px; }
+  .legend b,.legend em{ font-size:9px; }
+  .l-dot{ width:10px; height:10px; }
+}
+</style>
+</head>
+<body>
+<div class="page" data-od-id="page">
+
+  <header class="top" data-od-id="header">
+    <div class="title-block">
+      <h1>취합앱 유저 플로우</h1>
+      <p class="sub">로그인부터 결과 다운로드까지 — 사용자가 하는 동작과, 그 뒤에서 돌아가는 처리입니다.</p>
+    </div>
+    <div class="actions">
+      <button class="btn" id="exportBtn" data-od-id="export-btn" type="button">HTML로 저장 · 공유</button>
+    </div>
+  </header>
+
+  <section class="board" aria-label="유저 플로우 플로우차트">
+    <div class="board-caption">
+      <h2 data-od-id="flow-title">자료 취합 전용 프로그램 — 사용자 동작 흐름</h2>
+      <p class="caption-note">기준 — PRD v1.9 · 핸드오프(2026-08-04). 상자를 클릭하면 그 단계 뒤에서 돌아가는 세부 동작이 보입니다. 이름 · 근거 · 판정은 클릭해서 고칠 수 있습니다.</p>
+    </div>
+    <div class="flow" data-od-id="flowchart" id="flow" role="list" aria-label="유저 플로우 단계들"></div>
+  </section>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var KEY = "uf-route-board-v1";
+  var ORDER = ["untested","pass","partial","fail"];
+  var LABEL = { untested:"미점검", pass:"동작", partial:"일부 동작", fail:"동작 안 함" };
+  var DEFAULTS = /*EDITMODE-BEGIN*/ [
+    { id:"s1", name:"로그인 · 홈 진입", tip:"사번으로 로그인해 '생성'/'취합' 중 원하는 작업까지 도달하는지", state:"pass", note:"실제 Supabase로 인증 시나리오 13개 통과. 미로그인 접근은 로그인 화면으로 되돌려보냄.", ops:[{t:"사번 → 가상 이메일로 Auth 위임 · 비밀번호 검증",st:"pass"},{t:"토큰을 httpOnly 쿠키로 발급 · 권한(User/Admin) 판정",st:"pass"},{t:"홈에서 '생성' 탭 / '취합' 탭으로 화면 분기",st:"pass"}], next:["s2","s3","s4"] },
+    { id:"s2", name:"AI로 양식 만들기 (F1)", tip:"문답만으로 배포할 수 있는 xlsx 양식이 실제로 나오는지", state:"partial", note:"브라우저에서 문답→생성→다운로드 완주(gpt-5-mini, 2호출·5.2k토큰). 새로고침하면 확정한 사양을 두고도 문답을 처음부터 다시 해야 함.", ops:[{t:"AI 주도 문답으로 사양 수집 (최대 30턴 가드)",st:"pass"},{t:"서버가 완결성 검증 — 미비 시 생성 버튼 잠금",st:"pass"},{t:"AI가 워크북 저작 → 안전 검증 통과분만 xlsx로 변환",st:"pass"},{t:"작성기준(항목별 유형·형식·필수여부) 파생·저장",st:"pass"},{t:"외부 전송 동의 · 개인정보 마스킹",st:"pass"},{t:"참고 파일 첨부(F1-3) · 대화형 수정(F1-7)",st:"untested"}], next:["s5"] },
+    { id:"s3", name:"기존 양식 등록 (F6)", tip:"외부에서 확정돼 내려온 양식을 원본 그대로 쓸 수 있는지", state:"untested", note:"미착수. F1 인프라(문답 세션·양식 템플릿·작성기준)를 확장 재사용하는 설계.", ops:[{t:"발화·첨부에서 '기존 양식 사용' 의도 판정 → 분기",st:"untested"},{t:"시트·헤더·서식에서 작성기준 자동 추출",st:"untested"},{t:"애매한 항목만 확인 질문 후 원본 무변형 등록",st:"untested"}], next:["s5"] },
+    { id:"s4", name:"한글(hwpx) 병합 (F3)", tip:"별도 경로 — hwpx 여러 개가 지정한 순서 그대로 한 문서로 합쳐지는지", state:"pass", note:"실제 hwpx 3개를 병합해 한글 뷰어로 확인 — 12쪽·6,674자·3구역이 원본과 일치, 해석 불가 참조 0건. 상용 SDK 전환 불필요로 판정.", ops:[{t:"다중 업로드 · 행을 끌어 병합 순서 지정",st:"pass"},{t:"문서별 ID 공간 병합 (서식·구역·이미지 재번호)",st:"pass"},{t:"검증 미통과 시 결과 파일을 쓰지 않고 실패 처리",st:"pass"},{t:"단계·진행률 폴링 → 결과 다운로드",st:"pass"}], next:[] },
+    { id:"s5", name:"양식 배포 · 회신 수집", tip:"만든 양식이 부서로 나가고 회신 파일이 모여 돌아오는지", state:"pass", note:"양식 파일 다운로드 확인. 배포와 수집 자체는 앱 밖(메일·공유 폴더)에서 이뤄짐 — 제출 포털은 범위 제외.", ops:[{t:"양식 파일 다운로드",st:"pass"},{t:"양식 · 작성기준을 프로젝트에 보관",st:"pass"},{t:"(앱 외부) 부서 배포 → 회신 파일 회수",st:"untested"}], next:["s6"] },
+    { id:"s6", name:"회신 파일 업로드 · 조건 지정", tip:"실제 업무 양식의 표·헤더를 제대로 읽어내는지", state:"pass", note:"실제 업무 파일 20개(자체점검 8 + 분기실적 12)로 구조 인식 확인. 30개·99,990행 기준 6.7초.", ops:[{t:"형식·용량 검증 (파일당 50MB / 30개 / 총 500MB)",st:"pass"},{t:"시트·헤더·데이터 영역 인식 (병합셀·계층헤더·합계행 처리)",st:"pass"},{t:"취합할 표 고르기 · 키 컬럼 · 선택 입력 컬럼 지정",st:"pass"},{t:"파일별 부서명 추천·지정",st:"pass"},{t:"만들어 둔 양식을 골라 작성기준 불러오기",st:"pass"}], next:["s7"] },
+    { id:"s7", name:"검토 결과 확인 · 범위 선택", tip:"문제 파일이 '이상'으로 갈라져 보이고, 뺄 파일을 뺄 수 있는지", state:"partial", note:"업무 파일 12개 이슈 6,884 → 571건으로 줄고 남은 것은 대체로 정탐. 사진을 아예 안 붙인 경우는 이미지 컬럼을 건너뛰어 잡히지 않음.", ops:[{t:"1차 규칙 검증 전량 스캔 (정합성·누락·중복·충돌)",st:"pass"},{t:"1차 통과 파일만 2차 AI 재검증 (파일당 약 16초)",st:"pass"},{t:"정상/이상 이진 표시 + 사유·셀 위치 노출",st:"pass"},{t:"오류 파일 기본 해제 · 선택 (n/m)건 실시간 갱신",st:"pass"},{t:"오류 리포트 xlsx 다운로드 (자동교정 이력 포함)",st:"pass"}], next:["s8"] },
+    { id:"s8", name:"합성 모드 선택", tip:"모드별 결과 형태를 미리 보고 우리 업무에 맞는 것을 고를 수 있는지", state:"partial", note:"모드 A/B/C/D 실측, 모드 D 종합요약이 SUMIF 수식으로 생성됨. 시트명이 파일마다 다른 총괄표(피벗형)를 한 행으로 눕히는 변환은 아직 없음.", ops:[{t:"작성기준 준용 전처리 · 경고 항목 자동교정(원본값 보존)",st:"pass"},{t:"모드 A/B/C/D 카드 선택",st:"pass"},{t:"선택 모드의 시트 구성 미리보기",st:"pass"},{t:"총괄표(피벗형) 눕히기 변환",st:"untested"}], next:["s9"] },
+    { id:"s9", name:"결과 확인 · 다운로드", tip:"기대한 시트 구성으로 결과 파일이 손에 들어오는지", state:"pass", note:"결과·오류 리포트 다운로드 확인. 오류 파일을 강제로 포함하면 특이사항이 셀 위치까지 표시됨.", ops:[{t:"선택 파일 합성 → 결과 워크북 생성",st:"pass"},{t:"이미지 anchor 재배치 (행·열·표시 크기)",st:"pass"},{t:"취합 파일·생성 시트·자동수정·제외 파일 리포트",st:"pass"},{t:"오류 강제 포함 시 특이사항 안내",st:"pass"}], next:["s10"] },
+    { id:"s10", name:"이력 조회 · 재사용", tip:"다음 회차에 지난 양식·결과를 다시 꺼내 쓸 수 있는지", state:"partial", note:"검색·유형 필터·재다운로드 동작(세션이 사라진 뒤에도). 보관기간이 지난 자료를 실제로 지우는 배치와 중단된 취합 이어하기는 없음.", ops:[{t:"본인 작업 이력만 조회 · 검색·유형 필터",st:"pass"},{t:"과거 결과·리포트 재다운로드",st:"pass"},{t:"중단된 취합 이어서 하기",st:"untested"},{t:"보관기간(90일) 경과 자료 자동 삭제",st:"untested"}], next:[] }
+  ] /*EDITMODE-END*/;
+
+  function clone(d){
+    return { nodes: d.nodes.map(function(n){
+      return Object.assign({}, n, {
+        next:(n.next || []).slice(),
+        ops:(n.ops || []).map(function(o){ return { t:o.t, st:o.st }; })
+      });
+    }) };
+  }
+
+  function normalizeOp(op){
+    if(typeof op === "string") return { t:op, st:"untested" };
+    if(op && typeof op === "object"){
+      var st = (op.st === "pass" || op.st === "fail") ? op.st : "untested";
+      return { t: typeof op.t === "string" ? op.t : "", st: st };
+    }
+    return { t:"", st:"untested" };
+  }
+
+  function load(){
+    try{
+      var raw = localStorage.getItem(KEY);
+      if(raw){
+        var d = JSON.parse(raw);
+        var saved = d && (d.nodes || d.stations);
+        if(Array.isArray(saved) && saved.length){
+          var base = clone({ nodes: DEFAULTS });
+          var hasStructure = saved.every(function(s){ return s && typeof s.id === "string"; }) &&
+                             saved.some(function(s){ return Array.isArray(s.next); });
+          if(hasStructure){
+            base.nodes = saved.map(function(sn){
+              var dn = null;
+              DEFAULTS.forEach(function(x){ if(x.id === sn.id) dn = x; });
+              var merged = Object.assign({}, dn || {}, sn);
+              if(ORDER.indexOf(merged.state) === -1) merged.state = dn ? dn.state : "untested";
+              if(!Array.isArray(merged.next)) merged.next = [];
+              merged.ops = (Array.isArray(merged.ops) ? merged.ops : (dn && Array.isArray(dn.ops) ? dn.ops : [])).map(normalizeOp);
+              return merged;
+            });
+            return base;
+          }
+          base.nodes.forEach(function(n, i){
+            var s = saved[i];
+            if(!s) return;
+            if(typeof s.name === "string") n.name = s.name;
+            if(typeof s.note === "string") n.note = s.note;
+            if(Array.isArray(s.ops)) n.ops = s.ops.map(normalizeOp);
+            if(ORDER.indexOf(s.state) !== -1) n.state = s.state;
+          });
+          return base;
+        }
+      }
+    }catch(e){}
+    return clone({ nodes: DEFAULTS });
+  }
+  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} }
+
+  var state = load();
+  var flow = document.getElementById("flow");
+  var refs = [];
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  var svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "flow-edges");
+  svg.setAttribute("aria-hidden", "true");
+  var defs = document.createElementNS(SVG_NS, "defs");
+  defs.innerHTML =
+    '<marker id="edge-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">' +
+    '<path d="M 0 1 L 9 5 L 0 9 z" class="edge-head"></path></marker>';
+  svg.appendChild(defs);
+
+  var drawScheduled = false;
+  function scheduleDraw(){
+    if(drawScheduled) return;
+    drawScheduled = true;
+    requestAnimationFrame(function(){
+      drawScheduled = false;
+      drawEdges();
+    });
+  }
+
+  function drawEdges(){
+    var old = svg.querySelectorAll("path.edge");
+    for(var k = 0; k < old.length; k++) old[k].remove();
+    var rect = flow.getBoundingClientRect();
+    if(rect.width === 0) return;
+    var byId = {};
+    refs.forEach(function(r){ byId[r.s.id] = r; });
+    refs.forEach(function(r){
+      (r.s.next || []).forEach(function(tid){
+        var t = byId[tid];
+        if(!t) return;
+        var a = r.box.getBoundingClientRect();
+        var b = t.box.getBoundingClientRect();
+        var x1 = a.right - rect.left;
+        var y1 = a.top + a.height / 2 - rect.top;
+        var x2 = b.left - rect.left - 4;
+        var y2 = b.top + b.height / 2 - rect.top;
+        var dx = Math.max(20, Math.min(60, (x2 - x1) * 0.45));
+        var p = document.createElementNS(SVG_NS, "path");
+        p.setAttribute("class", "edge");
+        p.setAttribute("d", "M " + x1 + " " + y1 +
+          " C " + (x1 + dx) + " " + y1 + ", " + (x2 - dx) + " " + y2 + ", " + x2 + " " + y2);
+        p.setAttribute("marker-end", "url(#edge-head)");
+        svg.appendChild(p);
+      });
+    });
+  }
+
+  function computeLayers(){
+    var nodes = state.nodes;
+    var byId = {};
+    nodes.forEach(function(n){ byId[n.id] = n; });
+    var indeg = {};
+    nodes.forEach(function(n){ indeg[n.id] = 0; });
+    nodes.forEach(function(n){
+      (n.next || []).forEach(function(t){ if(indeg[t] !== undefined) indeg[t]++; });
+    });
+    var layer = {};
+    var queue = [];
+    nodes.forEach(function(n){ if(indeg[n.id] === 0){ queue.push(n.id); layer[n.id] = 0; } });
+    var indegWork = Object.assign({}, indeg);
+    while(queue.length){
+      var id = queue.shift();
+      ((byId[id] || {}).next || []).forEach(function(t){
+        if(byId[t] === undefined) return;
+        var cand = (layer[id] || 0) + 1;
+        if(layer[t] === undefined || cand > layer[t]) layer[t] = cand;
+        indegWork[t]--;
+        if(indegWork[t] === 0) queue.push(t);
+      });
+    }
+    nodes.forEach(function(n){ if(layer[n.id] === undefined) layer[n.id] = 0; });
+    var maxL = 0;
+    nodes.forEach(function(n){ if(layer[n.id] > maxL) maxL = layer[n.id]; });
+    var layers = [];
+    for(var l = 0; l <= maxL; l++){
+      layers.push(nodes.filter(function(n){ return layer[n.id] === l; }));
+    }
+    return layers;
+  }
+
+  function plainPaste(ev){
+    ev.preventDefault();
+    var text = (ev.clipboardData || window.clipboardData).getData("text/plain");
+    document.execCommand("insertText", false, text.replace(/\n+/g, " "));
+  }
+
+  var svgCaret =
+    '<svg class="s-caret" viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>';
+
+  function makeBox(s, i){
+    var box = document.createElement("div");
+    box.className = "box st-" + s.state;
+    box.setAttribute("role", "listitem");
+    box.setAttribute("data-od-id", "station-" + (i + 1));
+    box.tabIndex = 0;
+    box.innerHTML =
+      '<div class="box-top">' +
+        '<span class="s-tag">Step ' + String(i + 1).padStart(2,"0") + '</span>' +
+        '<button class="pill" type="button"><i aria-hidden="true"></i><span class="pill-label"></span></button>' +
+        svgCaret +
+      '</div>' +
+      '<h3 class="s-name" contenteditable="true" spellcheck="false"></h3>' +
+      '<p class="s-note" contenteditable="true" spellcheck="false" data-ph="근거 한 줄 — 방금 본 결과"></p>' +
+      '<div class="ops-panel">' +
+        '<div class="ops">' +
+          '<div class="ops-head">' +
+            '<span class="ops-label">세부 동작</span>' +
+            '<button class="ops-add" type="button" aria-label="세부 동작 추가">＋</button>' +
+          '</div>' +
+          '<ul class="ops-list"></ul>' +
+        '</div>' +
+      '</div>';
+    var pill = box.querySelector(".pill");
+    var pillLabel = box.querySelector(".pill-label");
+    var name = box.querySelector(".s-name");
+    var note = box.querySelector(".s-note");
+    var opsList = box.querySelector(".ops-list");
+    var opsAdd = box.querySelector(".ops-add");
+    name.textContent = s.name;
+    name.setAttribute("title", "확인할 것 — " + s.tip);
+    note.textContent = s.note;
+
+    function setOpen(open){
+      box.classList.toggle("open", open);
+      box.setAttribute("aria-expanded", open ? "true" : "false");
+      scheduleDraw();
+    }
+    box.addEventListener("click", function(ev){
+      if(ev.target.closest(".pill") || ev.target.closest("[contenteditable]") ||
+         ev.target.closest(".ops-add") || ev.target.closest(".op-del")) return;
+      setOpen(!box.classList.contains("open"));
+    });
+    box.addEventListener("keydown", function(ev){
+      if(ev.target !== box) return;
+      if(ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); setOpen(!box.classList.contains("open")); }
+    });
+
+    function renderOps(){
+      opsList.innerHTML = "";
+      s.ops.forEach(function(op, idx){
+        var li = document.createElement("li");
+        li.className = "op";
+        li.setAttribute("data-st", op.st);
+        var check = document.createElement("button");
+        check.className = "op-check";
+        check.type = "button";
+        check.setAttribute("aria-label",
+          "세부 동작 " + (idx + 1) + " — 상태: " + (op.st === "pass" ? "동작" : op.st === "fail" ? "안 함" : "미확인") + ". 클릭해서 변경");
+        check.addEventListener("click", function(ev){
+          ev.stopPropagation();
+          var order = ["untested","pass","fail"];
+          op.st = order[(order.indexOf(op.st) + 1) % order.length];
+          save(); renderOps();
+        });
+        var span = document.createElement("span");
+        span.className = "op-text";
+        span.contentEditable = "true";
+        span.spellcheck = false;
+        span.textContent = op.t;
+        span.addEventListener("input", function(){ op.t = span.textContent; save(); });
+        span.addEventListener("keydown", function(ev){
+          if(ev.key === "Enter"){ ev.preventDefault(); span.blur(); }
+        });
+        span.addEventListener("paste", plainPaste);
+        var del = document.createElement("button");
+        del.className = "op-del";
+        del.type = "button";
+        del.setAttribute("aria-label", "세부 동작 삭제");
+        del.textContent = "×";
+        del.addEventListener("click", function(ev){
+          ev.stopPropagation();
+          s.ops.splice(idx, 1);
+          save(); renderOps();
+        });
+        li.appendChild(check);
+        li.appendChild(span);
+        li.appendChild(del);
+        opsList.appendChild(li);
+      });
+      scheduleDraw();
+    }
+    opsAdd.addEventListener("click", function(ev){
+      ev.stopPropagation();
+      s.ops.push({ t:"", st:"untested" });
+      save(); renderOps();
+      var items = opsList.querySelectorAll(".op-text");
+      if(items.length) items[items.length - 1].focus();
+    });
+    renderOps();
+
+    pill.addEventListener("click", function(ev){
+      ev.stopPropagation();
+      var next = (ORDER.indexOf(s.state) + 1) % ORDER.length;
+      s.state = ORDER[next];
+      save(); render();
+    });
+    name.addEventListener("input", function(){ s.name = name.textContent; save(); scheduleDraw(); });
+    note.addEventListener("input", function(){ s.note = note.textContent; save(); scheduleDraw(); });
+    [name, note].forEach(function(el){
+      el.addEventListener("keydown", function(ev){
+        if(ev.key === "Enter"){ ev.preventDefault(); el.blur(); }
+      });
+      el.addEventListener("paste", plainPaste);
+    });
+
+    refs.push({ box:box, pill:pill, pillLabel:pillLabel, name:name, note:note, s:s, i:i });
+    return box;
+  }
+
+  function buildFlow(){
+    refs.length = 0;
+    flow.innerHTML = "";
+    flow.appendChild(svg);
+    var layers = computeLayers();
+    layers.forEach(function(layerNodes){
+      var col = document.createElement("div");
+      col.className = "flow-col";
+      layerNodes.forEach(function(n){
+        col.appendChild(makeBox(n, state.nodes.indexOf(n)));
+      });
+      flow.appendChild(col);
+    });
+    scheduleDraw();
+  }
+  buildFlow();
+
+  window.addEventListener("resize", scheduleDraw);
+  if(document.fonts && document.fonts.ready){ document.fonts.ready.then(function(){ scheduleDraw(); }); }
+
+  var chip = document.getElementById("summaryChip");
+
+  function render(){
+    var counts = { pass:0, partial:0, fail:0 };
+    refs.forEach(function(r){
+      r.box.className = "box st-" + r.s.state + (r.box.classList.contains("open") ? " open" : "");
+      r.box.setAttribute("role", "listitem");
+      r.box.setAttribute("data-od-id", "station-" + (r.i + 1));
+      r.pillLabel.textContent = LABEL[r.s.state];
+      r.pill.setAttribute("aria-label",
+        "Step " + String(r.i + 1).padStart(2,"0") + " " + r.s.name +
+        " — 상태: " + LABEL[r.s.state] + ". 클릭해서 판정 변경");
+      if(counts.hasOwnProperty(r.s.state)) counts[r.s.state]++;
+    });
+    var checked = counts.pass + counts.partial + counts.fail;
+    if(chip) chip.innerHTML =
+      "<b>" + checked + "/" + refs.length + "단계 점검</b>" +
+      '<span class="cnt"><span class="cd pass"></span>동작 ' + counts.pass + '</span>' +
+      '<span class="cnt"><span class="cd partial"></span>일부 ' + counts.partial + '</span>' +
+      '<span class="cnt"><span class="cd fail"></span>안 됨 ' + counts.fail + '</span>';
+  }
+
+  var resetBtn = document.getElementById("resetBtn");
+  if(resetBtn) resetBtn.addEventListener("click", function(){
+    state = clone({ nodes: DEFAULTS });
+    save();
+    buildFlow();
+    render();
+  });
+  var printBtn = document.getElementById("printBtn");
+  if(printBtn) printBtn.addEventListener("click", function(){ window.print(); });
+
+  document.getElementById("exportBtn").addEventListener("click", function(){
+    var btn = document.getElementById("exportBtn");
+    var snapshot = state.nodes.map(function(n){
+      return { id:n.id, name:n.name, tip:n.tip, state:n.state, note:n.note,
+        ops:(n.ops || []).map(function(o){ return { t:o.t, st:o.st }; }), next:(n.next || []).slice() };
+    });
+    // 내보내는 파일은 빈 그릇으로 — 상태와 구조는 DEFAULTS 블록에 심는다
+    flow.innerHTML = "";
+    if(chip) chip.innerHTML = "";
+    var html = "<!DOCTYPE html>\n" + document.documentElement.outerHTML;
+    var literal = JSON.stringify(snapshot, null, 1);
+    html = html.replace(
+      /\/\*EDITMODE-BEGIN\*\/[\s\S]*?\/\*EDITMODE-END\*\//,
+      "/*EDITMODE-BEGIN*/ " + literal + " /*EDITMODE-END*/"
+    );
+    buildFlow();
+    render();
+    var blob = new Blob([html], { type:"text/html;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    var d = new Date();
+    var stamp = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+    link.href = url;
+    link.download = "유저플로우-점검-현황-" + stamp + ".html";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+    var original = btn.textContent;
+    btn.textContent = "저장됨 — 공유하세요";
+    setTimeout(function(){ btn.textContent = original; }, 1800);
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
