@@ -129,6 +129,9 @@ class SheetData:
     images: list[dict] = field(default_factory=list)
     col_types: list[str] = field(default_factory=list)
     merged: list[tuple[int, int, int, int]] = field(default_factory=list)  # (min_row, min_col, max_row, max_col)
+    # _fill_merged가 값을 복사해 채운 세로 병합 구간 — (rows 첫 인덱스, 마지막 인덱스, 컬럼 0-base).
+    # 결과에 다시 병합으로 되돌리는 데 쓴다(_restore_vmerges).
+    vmerges: list[tuple[int, int, int]] = field(default_factory=list)
     # 원본 표 끝의 합계 행 — 취합에서는 뺐지만(이중 합산 방지) 결과 끝에 SUM 수식으로 다시 만든다.
     # total_cols는 원본 합계 행에 숫자가 있던 컬럼(0-base). 준공연도처럼 더하지 않는 컬럼을
     # 짐작으로 더하지 않기 위해 원본이 더한 컬럼만 더한다.
@@ -643,7 +646,7 @@ def read_file(path: Path, include_hidden: bool = False,
             name = ws.title if len(tables) == 1 else f"{ws.title} ({part})"
             # 어떤 행이 데이터인지는 원본 기준으로 먼저 정하고, 병합 값은 그 뒤에 채운다.
             # 순서가 바뀌면 미리 병합해 둔 빈 템플릿 행까지 값이 생겨 데이터로 되살아난다.
-            _fill_merged(rows, row_numbers, merged)
+            vmerges = _fill_merged(rows, row_numbers, merged)
             total = _total_row_of(grid, dropped)
             if dropped:
                 # 합계·각주 행은 실제 양식의 정상 구조라 결함이 아니다 — 경고로 두면 합계 행을
@@ -673,6 +676,7 @@ def read_file(path: Path, include_hidden: bool = False,
             lo, hla = row_numbers[0], row_numbers[-1]
             mine = [im for im in images if lo <= im["from"][0] <= hla] if len(tables) > 1 else images
             data = SheetData(name, hi + 1, headers, rows, row_numbers, mine, merged=merged,
+                             vmerges=vmerges,
                              total_label=total[0], total_label_col=total[1], total_cols=total[2])
             if pivot_sheets and name in pivot_sheets:
                 # 피벗으로 고른 표는 한 줄로 눕히고 한 이름으로 모은다(§9 모드가 그대로 먹는다)
@@ -712,18 +716,24 @@ def read_file(path: Path, include_hidden: bool = False,
 
 
 def _fill_merged(rows: list[list], row_numbers: list[int],
-                 merged: list[tuple[int, int, int, int]]) -> None:
-    """병합 셀의 값을 그 범위에 속한 데이터 행에 채운다.
+                 merged: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int]]:
+    """병합 셀의 값을 그 범위에 속한 데이터 행에 채우고, 채운 구간을 돌려준다.
 
     엑셀에서 세로로 병합된 칸은 사람 눈에는 구간 전체의 값이지만, 파일에는
     좌상단 한 칸만 값이 있고 나머지는 비어 있다. 채우지 않으면 실제 업무 양식의
     '지사'·'개소'처럼 여러 행에 걸친 칸이 전부 필수값 누락으로 잡힌다.
 
+    다만 채운 값은 **검증용**이다. 그대로 결과에 쓰면 '개소'처럼 구간 하나를 세는
+    컬럼이 행마다 반복되어 합계가 부풀어 오른다(실측: 판교 2개소가 2+2, 수원 3개소가
+    3+3+3 → 결과 합 44 vs 원본 합 34). 그래서 채운 구간을 돌려주고 결과에서는
+    `_restore_vmerges`가 다시 병합으로 되돌린다.
+
     이미 데이터로 확정된 행만 대상이다 — 양식이 미리 병합해 둔 빈 행까지 채우면
     값이 생겨 데이터 행으로 되살아난다(실제 양식은 5~60행을 미리 병합해 둔다).
     """
     if not rows:
-        return
+        return []
+    runs: list[tuple[int, int, int]] = []
     index_of = {number: i for i, number in enumerate(row_numbers)}
     for min_row, min_col, max_row, max_col in merged:
         if min_row == max_row and min_col == max_col:
@@ -731,15 +741,36 @@ def _fill_merged(rows: list[list], row_numbers: list[int],
         source = index_of.get(min_row)
         if source is None:
             continue                       # 병합 시작 행이 데이터가 아니면(제목 등) 건너뛴다
+        targets = [index_of[n] for n in range(min_row, max_row + 1) if n in index_of]
         width = len(rows[source])
         for c in range(min_col - 1, min(max_col, width)):
             value = rows[source][c]
             if _is_blank(value):
                 continue
-            for number in range(min_row, max_row + 1):
-                target = index_of.get(number)
-                if target is not None and _is_blank(rows[target][c]):
+            for target in targets:
+                if _is_blank(rows[target][c]):
                     rows[target][c] = value
+            # 중간에 뺀 행(합계·빈 행)이 끼어 끊긴 구간은 되돌리지 않는다 — 병합하면
+            # 그 병합에 없던 행까지 묶인다. 값은 채운 채 두고 검증만 받는다
+            if max_row > min_row and len(targets) > 1 and                     targets[-1] - targets[0] + 1 == len(targets):
+                runs.append((targets[0], targets[-1], c))
+    return runs
+
+
+def _restore_vmerges(ws, sheet: "SheetData", first: int, col_offset: int,
+                     skip_col: int = 0) -> None:
+    """원본에서 세로 병합이던 칸을 결과에도 병합으로 되돌린다.
+
+    openpyxl은 병합할 때 좌상단 외의 값을 지우므로, 반복해 채워 둔 값이 한 번만
+    남고 합계 SUM도 한 번만 센다. `first`는 이 파일 블록의 첫 출력 행,
+    `col_offset`은 앞에 끼운 '구분'·'부서' 컬럼 수다.
+    """
+    for lo, hi, col in sheet.vmerges:
+        column = col + col_offset + 1
+        if column == skip_col:
+            continue           # 부서 구분 컬럼은 파일 블록 단위로 따로 병합한다(이중 병합 금지)
+        ws.merge_cells(start_row=first + lo, start_column=column,
+                       end_row=first + hi, end_column=column)
 
 
 # ── 3. 데이터 유형 분류 ───────────────────────────────────────────────────────
@@ -1847,6 +1878,7 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
                 labels.append(tpl.source_label)
                 first = xf.open_sheet(ws, tpl, sheet.headers)
                 last = _write_block(ws, [], sheet.rows, first) - 1
+                _restore_vmerges(ws, sheet, first, 0)
                 _add_images(ws, sheet, _row_offset(sheet, first))
                 xf.close_sheet(ws, tpl, sheet.headers, first, last)
                 total_rows += len(sheet.rows)
@@ -1914,6 +1946,8 @@ def synthesize(files: list[UploadedFile], mode: str, group_map: dict, summary_co
             cursor = _write_block(ws, [], rows, cursor)
             if rows:
                 dept_rows.setdefault(title, {})[uf.dept] = (first, cursor - 1)
+                if mode != "D":
+                    _restore_vmerges(ws, sheet, first, len(extra), skip_col=dept_col)
             # extra(구분·부서)가 앞에 끼므로 이미지도 그만큼 오른쪽으로 밀어야 한다
             _add_images(ws, sheet, _row_offset(sheet, first), col_offset=len(extra))
         total_rows += cursor - first_data_row

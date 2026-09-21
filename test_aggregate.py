@@ -1566,6 +1566,77 @@ def test_report_format_and_order(tmp: Path):
     print("  ✓ 리포트 서식·개요·호출 순서 불변")
 
 
+def test_merged_count_column_stays_one_value(tmp: Path):
+    """세로 병합한 '개소' 칸이 결과에서 행마다 반복되지 않는다.
+
+    병합 셀은 파일에 좌상단 한 칸만 값이 있어 검증 전에 구간 전체로 채운다(_fill_merged).
+    그 값을 그대로 결과에 쓰면 구간 하나를 세는 컬럼이 행 수만큼 곱해진다 — 실측(지사별
+    회신본 8개): 판교 2개소가 2+2, 수원 3개소가 3+3+3이 되어 결과 합계가 44, 원본 8개
+    파일의 합계 총합은 34였다. 채우기는 그대로 두고 결과에서 병합으로 되돌린다.
+    """
+    def form(path: Path, dept: str, rows: list, count: int) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "대상 리스트"
+        ws["A1"] = "2025년 자체점검 결과"
+        ws.merge_cells("A1:D1")
+        for c, h in enumerate(["지사", "개소", "위치", "온도차"], start=1):
+            ws.cell(row=4, column=c, value=h)
+        for i, (loc, temp) in enumerate(rows):
+            ws.cell(row=5 + i, column=3, value=loc)
+            ws.cell(row=5 + i, column=4, value=temp)
+        ws.cell(row=5, column=1, value=dept)
+        ws.cell(row=5, column=2, value=count)     # 구간 전체의 개소 — 병합해 한 번만 적는다
+        last = 4 + len(rows)
+        ws.merge_cells(start_row=5, start_column=1, end_row=last, end_column=1)
+        ws.merge_cells(start_row=5, start_column=2, end_row=last, end_column=2)
+        ws.cell(row=last + 2, column=1, value="합 계")
+        ws.cell(row=last + 2, column=2, value=count)
+        wb.save(path)
+
+    a = tmp / "자체점검(판교지사).xlsx"
+    b = tmp / "자체점검(수원사업소).xlsx"
+    form(a, "판교지사", [("백현동 555-2", 5.1), ("삼평동 672-6", 4.2)], 2)
+    form(b, "수원사업소", [("권선동", 6.9), ("탑동", 9.8), ("구운동", 3.4)], 3)
+
+    files = []
+    for path in (a, b):
+        uf = ag.read_file(path)
+        uf.dept = ag.suggest_dept_names(path.stem, [a.stem, b.stem])[0]
+        ag.review_stage1(uf, rules={})
+        files.append(uf)
+
+    # ① 채우기는 그대로다 — 안 채우면 병합 아래 행의 지사·개소가 전부 필수값 누락이 된다
+    assert all(uf.status == "정상" for uf in files), [i.line() for uf in files for i in uf.issues]
+    assert [r[1] for r in files[0].sheets[0].rows] == [2, 2], files[0].sheets[0].rows
+    assert files[0].sheets[0].vmerges == [(0, 1, 0), (0, 1, 1)], files[0].sheets[0].vmerges
+
+    wb, _, _ = ag.synthesize(files, "B", {}, [])
+    ws = wb["대상 리스트"]
+    head = next(r for r in range(1, ws.max_row + 1)
+                if "개소" in [ws.cell(r, c).value for c in range(1, ws.max_column + 1)])
+    col = next(c for c in range(1, ws.max_column + 1) if ws.cell(head, c).value == "개소")
+    letter = openpyxl.utils.get_column_letter(col)
+
+    # ② 파일당 한 번만 남는다 — 병합하면 openpyxl이 좌상단 외의 값을 지운다
+    body = [ws.cell(r, col).value for r in range(head + 1, ws.max_row)]
+    assert body == [2, None, 3, None, None], body
+    assert f"{letter}{head + 1}:{letter}{head + 2}" in [str(m) for m in ws.merged_cells.ranges]
+
+    # ③ 합계가 원본 합계의 총합과 맞는다(2 + 3). 수식이 훑는 범위는 그대로 전 데이터 행이다
+    assert ws.cell(ws.max_row, col).value == f"=SUM({letter}{head + 1}:{letter}{ws.max_row - 1})"
+    assert sum(v for v in body if v is not None) == 5
+
+    # ④ 모드 D는 병합하지 않는다 — 종합요약의 SUMIF가 첫 행만 더한다(부서 병합과 같은 이유)
+    wb_d, _, _ = ag.synthesize(files, "D", {}, ["온도차"])
+    ws_d = wb_d["대상 리스트"]
+    head_d = next(r for r in range(1, ws_d.max_row + 1)
+                  if "개소" in [ws_d.cell(r, c).value for c in range(1, ws_d.max_column + 1)])
+    col_d = next(c for c in range(1, ws_d.max_column + 1) if ws_d.cell(head_d, c).value == "개소")
+    assert ws_d.cell(head_d + 2, col_d).value == 2, "모드 D는 채운 값을 그대로 둔다"
+    print("  ✓ 세로 병합한 수량 칸이 결과에서 한 번만 세어진다(합계 부풀림 없음)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
@@ -1575,6 +1646,7 @@ def main() -> int:
                    test_rules_and_masking, test_synthesis_modes,
                    test_image_anchor_relocation, test_real_form_structure,
                    test_blank_dept_column_and_note_sheet,
+                   test_merged_count_column_stays_one_value,
                    test_stacked_tables_and_tiered_header, test_pivot_flatten,
                    test_stage2_parallel, test_stage2_cell_gating_and_context, test_plan_aggregation,
                    test_format_capture,
