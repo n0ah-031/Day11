@@ -87,10 +87,12 @@ def _apply_dept_names(session: dict) -> None:
     파일을 만질 때마다 이걸 통과시킨다.
     """
     names = session.get("dept_names") or {}
+    stems = [uf.path.stem for uf in session["files"]]
     for fid, uf in enumerate(session["files"]):
         chosen = (names.get(str(fid)) or "").strip()
-        if chosen:
-            uf.dept = chosen
+        # 고르지 않았으면 후보 1순위 — 파일명 전체가 부서명이 되면 소속 컬럼 자동 채움이
+        # 파일명을 지사 칸에 써 넣는다. 후보는 화면의 칩과 같은 계산이라 첫 칩이 기본이다
+        uf.dept = chosen or ag.suggest_dept_names(uf.path.stem, stems)[0]
 
 
 def _limits() -> dict:
@@ -444,6 +446,28 @@ async def upload_files(sid: str, files: list[UploadFile] = File(...), user: dict
     return _start_job(work, user["id"])
 
 
+@app.post("/api/session/{sid}/plan")
+def plan(sid: str, user: dict = User) -> dict:
+    """업로드 직후 AI가 양식 구조를 읽고 취합 설정(키 컬럼·선택 입력 컬럼·부서명·취합할 표·
+    피벗)을 제안한다 — 담당자가 손으로 취합할 때 첫 단계에서 하는 일이다.
+
+    제안일 뿐이라 화면은 그 값으로 칩을 미리 채우고 사용자가 고친다. AI를 못 쓰면 plan이
+    null이고 종전처럼 직접 고른다. 이름은 엔진이 실제 헤더·표 이름에 대조해 걸러 낸다.
+    """
+    session = _session(sid, user)
+    model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+
+    def work(report):
+        report("AI가 양식 구조를 읽는 중", 0, 1)
+        before = ag.usage_snapshot()
+        proposal = ag.plan_aggregation(session["files"], model)
+        session["plan_usage"] = ag.usage_delta(before)
+        report("취합 계획 완료", 1, 1)
+        return {"plan": proposal, "ai_usage": session["plan_usage"]}
+
+    return _start_job(work, user["id"])
+
+
 @app.post("/api/session/{sid}/review")
 def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
     session = _session(sid, user)
@@ -521,10 +545,12 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
             if uf.readable:
                 ag.review_stage1(uf, rules, period=period)
 
-        # 2단계는 파일당 십수 초 걸리는 API 호출이라 한꺼번에 병렬로 돌린다.
-        # 게이팅(§4.2)은 review_stage2_many가 파일 단위로 적용한다.
+        # 2단계는 파일당 수 초~십수 초 걸리는 API 호출이라 한꺼번에 병렬로 돌린다.
+        # 게이팅(§4.2)은 칸 단위다 — 오류 등급(기본 제외) 파일만 통째로 빼고, 나머지 파일은
+        # 1단계 위반 칸을 제외한 칸을 보낸다. 작성기준(rules)과 양식 안내문이 컨텍스트로 간다
+        session["ai_usage"] = None
         if not no_ai:
-            gated = [uf for uf in session["files"] if uf.readable and not uf.issues]
+            gated = [uf for uf in session["files"] if uf.readable and uf.sheets and uf.grade != ag.ERROR]
             if gated:
                 done = 0
 
@@ -534,7 +560,8 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
                     report(f"AI 재검증 중 ({done}/{len(gated)})", done, len(gated))
 
                 report("AI 재검증 중", 0, len(gated))
-                ag.review_stage2_many(session["files"], model, on_done=ai_progress)
+                session["ai_usage"] = ag.review_stage2_many(session["files"], model,
+                                                            on_done=ai_progress, rules=rules)
 
         out, columns = [], []
         for fid, uf in enumerate(session["files"]):
@@ -558,7 +585,8 @@ def review(sid: str, body: dict = Body(default={}), user: dict = User) -> dict:
                             "message": f"{i.tag} {i.reason}"} for i in uf.issues],
             })
         report("검토 완료", total, total)
-        return {"files": out, "columns": list(dict.fromkeys(columns))}
+        return {"files": out, "columns": list(dict.fromkeys(columns)),
+                "ai_usage": session.get("ai_usage")}          # 호출 수·토큰 — 비용은 보여야 한다
 
     return _start_job(work, user["id"])
 
@@ -651,12 +679,18 @@ def aggregate(sid: str, body: dict = Body(default={}), user: dict = User) -> dic
         attr_of = {(i.file, i.sheet, i.cell): i.attr for uf in selected for i in uf.issues}
         # 개요는 데이터 시트가 아니라 안내다. 세면 '결과 시트 N개'가 틀린 값이 된다
         data_sheets = [s for s in wb.sheetnames if s != xf.OVERVIEW_SHEET]
+        # 이 작업이 쓴 AI 호출·토큰(취합 계획 + 2단계 재검증). 작업 기록(stats_json)에 남아
+        # Admin 대시보드의 API 비용 항목의 근거가 된다
+        usage = {k: sum((session.get(key) or {}).get(k, 0) for key in ("plan_usage", "ai_usage"))
+                 for k in ("calls", "prompt_tokens", "completion_tokens")}
         payload = {
             "metrics": {
                 "aggregated": len(selected),
                 "sheets": len(data_sheets),                       # ← wb.sheetnames 대신
                 "autofixed": sum(len(uf.fixes) for uf in selected),
                 "excluded": len(files) - len(selected),
+                "ai_calls": usage["calls"],
+                "ai_tokens": usage["prompt_tokens"] + usage["completion_tokens"],
             },
             "result_sheets": data_sheets,                         # ← wb.sheetnames 대신
             "excluded_files": [{"name": uf.name, "issue_count": len(uf.issues)}

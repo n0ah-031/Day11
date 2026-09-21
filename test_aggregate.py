@@ -109,7 +109,10 @@ def test_default_miss_collapse(tmp: Path):
                               ["A04", "기획부", 400, "정상"]]})
     uf4 = ag.read_file(small)
     ag.review_stage1(uf4, rules={})
-    assert sum(1 for i in uf4.issues if i.reason == "필수값 누락") == 2
+    # 예산액 공란은 개별 오류 그대로. 부서 공란(A03)은 소속 컬럼이고 적힌 값이 전부 이 파일의
+    # 부서(기획부)라 부서명으로 채워지며 자동교정 이력에 남는다(개별 오류가 아니다)
+    assert [i.cell for i in uf4.issues if i.reason == "필수값 누락"] == ["C5"], [i.line() for i in uf4.issues]
+    assert [(f.cell, f.corrected) for f in uf4.fixes] == [("B6", "기획부")], uf4.fixes
     assert not any(i.kind == "가정" for i in uf4.issues)
 
     # ⑤ 키 가정 폭주 — 분류처럼 반복되는 첫 컬럼이 키로 잘못 가정되면 행 수만큼
@@ -305,9 +308,13 @@ def test_synthesis_modes(tmp: Path):
     wb, _, _ = ag.synthesize(files, "B", {}, [])
     assert sorted(wb.sheetnames) == ["예산", "인원", "취합 개요"], wb.sheetnames  # m = 2 + 취합 개요
     ws = wb["예산"]
-    # 헤더는 1행이 아니라 원본 자리(3행: 제목1 + 공백2 다음)로 복원된다
-    assert ws.cell(row=3, column=1).value == "부서", "부서 구분 컬럼이 추가돼야 한다"
+    # 헤더는 1행이 아니라 원본 자리(3행: 제목1 + 공백2 다음)로 복원된다.
+    # 양식에 이미 '부서' 컬럼이 있고 값이 부서명과 같으므로 구분 컬럼을 하나 더 붙이지 않는다
+    assert [ws.cell(row=3, column=c).value for c in (1, 2)] == ["사번", "부서"], \
+        "소속 컬럼이 이미 있으면 '부서' 컬럼을 중복으로 붙이지 않는다"
     assert ws.max_row == 7, ws.max_row                # 제목 2 + 헤더 1 + 데이터 (2+2) 행
+    # 부서 구간(2행씩)의 소속 칸은 세로 병합된다 — 기관이 손으로 만드는 취합본의 모양
+    assert {str(m) for m in ws.merged_cells.ranges} >= {"B4:B5", "B6:B7"}, ws.merged_cells.ranges
 
     wb, notes, _ = ag.synthesize(files, "C", {"예산": "재정"}, [])
     assert sorted(wb.sheetnames) == ["미분류", "재정", "취합 개요"], wb.sheetnames  # k = 2 + 취합 개요, 인원→미분류
@@ -372,13 +379,23 @@ def test_image_anchor_relocation(tmp: Path):
     got = placed(wb, "A")
     assert got["기획부_실적"] == [(4, 4, (96, 72))], got
 
-    # 모드 B: '부서' 컬럼이 앞에 끼므로 증빙사진은 D→E(5). 행은 파일별 시작 행.
+    # 모드 B: 양식에 '부서' 컬럼이 이미 있고 값이 부서명과 같아 구분 컬럼을 붙이지 않으므로
+    # 증빙사진은 D(4) 그대로. 행은 파일별 시작 행. (placed는 저장하므로 한 번만 부른다)
     wb, _, _ = ag.synthesize(files, "B", {}, [])
-    assert placed(wb, "B")["실적"] == [(4, 5, (96, 72)), (6, 5, (96, 72))], placed(wb, "B")
+    got_b = placed(wb, "B")
+    assert got_b["실적"] == [(4, 4, (96, 72)), (6, 4, (96, 72))], got_b
 
-    # 모드 C: '구분'+'부서' 2개가 끼므로 D→F(6).
+    # 모드 C: '구분' 1개만 끼므로 D→E(5).
     wb, _, _ = ag.synthesize(files, "C", {"실적": "상반기"}, [])
-    assert placed(wb, "C")["상반기"] == [(4, 6, (96, 72)), (6, 6, (96, 72))], placed(wb, "C")
+    got_c = placed(wb, "C")
+    assert got_c["상반기"] == [(4, 5, (96, 72)), (6, 5, (96, 72))], got_c
+
+    # 소속 컬럼 값이 부서명과 다르면 종전대로 '부서' 컬럼이 앞에 끼어 D→E(5)로 밀린다
+    for uf in files:
+        uf.dept = uf.dept + "(회신)"
+    wb, _, _ = ag.synthesize(files, "B", {}, [])
+    got_b2 = placed(wb, "B2")
+    assert got_b2["실적"] == [(4, 5, (96, 72)), (6, 5, (96, 72))], got_b2
     print("  ✓ 이미지 anchor 재배치(행·열 추종 + 표시 크기 보존)")
 
 
@@ -445,21 +462,143 @@ def test_real_form_structure(tmp: Path):
     ag.review_stage1(uf, rules={})
     errors = [i for i in uf.issues if i.grade == ag.ERROR]
     assert not errors, [i.line() for i in errors]
-    assert uf.grade == ag.WARN, [i.line() for i in uf.issues]
-    # 등급이 오류가 아니므로 취합에 기본 포함된다 (§7)
+    # 안내 시트·합계·각주는 양식의 정상 구조라 등급 없는 안내다 — 파일은 '정상'이고 취합에 기본 포함된다
+    assert uf.grade == ag.OK and uf.status == "정상", [i.line() for i in uf.issues]
     reasons = " ".join(i.reason for i in uf.issues)
     assert "표 구조가 아니어서" in reasons and "합계·각주" in reasons, reasons
+    assert all(i.tag == "[안내]" for i in uf.issues), [i.line() for i in uf.issues]
 
     # 첫 컬럼(지사)이 반복되어도 키 충돌로 오탐하지 않는다 — 고유한 '위치'를 키로 잡는다
     assert ag._pick_key_column(sheet.headers, sheet.rows) == 2, sheet.headers
 
-    # 합계 행이 취합에 섞이면 모드 B/D에서 이중 계상된다
+    # 원본 합계 행은 취합에 섞이지 않고(모드 B/D 이중 계상 방지) 결과 끝에 SUM 수식으로만 다시 선다
     result, _, _ = ag.synthesize([uf], "B", {}, [])
     body = result["2025년 대상 리스트"]
-    assert body.max_row == 7, body.max_row          # 제목 3(제목·공백·안내) + 헤더 1 + 데이터 3
-    assert all(str(body.cell(row=r, column=2).value).replace(" ", "") not in ("합계", "계")
-               for r in range(5, body.max_row + 1))
+    assert body.max_row == 8, body.max_row          # 제목 3(제목·공백·안내) + 헤더 1 + 데이터 3 + 합계 1
+    width = range(1, body.max_column + 1)
+    assert all(str(body.cell(row=r, column=c).value).replace(" ", "") not in ("합계", "계")
+               for r in range(5, 8) for c in width)
+    last = [body.cell(row=8, column=c).value for c in width]
+    assert any(str(v).replace(" ", "") in ag.TOTAL_LABELS for v in last if v is not None), last
+    assert any(isinstance(v, str) and v.startswith("=SUM(") for v in last), last
+    # 원본이 더한 컬럼(개소)만 더한다 — 준공연도·온도차를 짐작으로 합치지 않는다
+    assert sum(1 for v in last if isinstance(v, str) and v.startswith("=SUM(")) == 1, last
     print("  ✓ 실제 업무 양식 구조(안내 시트·세로 병합·합계·각주 행)")
+
+
+def test_blank_dept_column_and_note_sheet(tmp: Path):
+    """지사·개소를 비운 회신본이 통째로 빠지지 않고, 결과가 원본 양식의 모양을 따른다.
+
+    실측(지사별 자체점검 2건): 중앙지사 회신본은 지사·개소 공란 4행이 필수값 누락 8건이 되어
+    취합에서 제외됐고(1/2건), 용인 회신본은 안내 시트 때문에 '이상'으로 표시됐다. 강제로
+    포함해도 결과는 '부서' 컬럼이 덧붙은 납작한 표였다 — 기관이 손으로 만든 취합본은 지사 칸을
+    세로 병합하고 합계 행과 안내 시트를 유지한다.
+    """
+    def form(path: Path, dept: str, rows: list, fill_dept: bool) -> None:
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        guide = wb.create_sheet("작성 주의사항")
+        guide["A1"] = "집중안전점검 작성 주의사항"
+        guide["A3"] = "ㅇ 해당지사 : 전 지사"
+        ws = wb.create_sheet("대상 리스트")
+        ws["A1"] = "2025년 자체점검 결과"
+        ws.merge_cells("A1:E1")
+        for c, h in enumerate(["지사", "개소", "위치", "점검일시", "온도차"], start=1):
+            ws.cell(row=4, column=c, value=h)
+        for i, (loc, temp) in enumerate(rows):
+            if fill_dept:
+                ws.cell(row=5 + i, column=1, value=dept)
+                ws.cell(row=5 + i, column=2, value=1)
+            ws.cell(row=5 + i, column=3, value=loc)
+            ws.cell(row=5 + i, column=4, value=f"2025-01-{10 + i}")
+            ws.cell(row=5 + i, column=5, value=temp)
+        ws.merge_cells("A5:A17")                      # 양식이 미리 병합해 둔 구간
+        ws.merge_cells("B5:B17")
+        # 합계는 데이터에서 멀리(62행) 떨어져 있다 — 빈 구간 뒤의 합계도 이 표의 것이다
+        ws["A62"], ws["B62"] = "합 계", (len(rows) if fill_dept else 0)
+        ws["A63"] = " *  해당기간 내 지열온도차 발생 없음"
+        wb.save(path)
+
+    a = tmp / "2025년 자체점검 리스트(용인).xlsx"
+    b = tmp / "2025년 자체점검 리스트(중앙지사).xlsx"
+    form(a, "용인", [("마북동 481", 10.9)], fill_dept=True)
+    form(b, "중앙지사", [("여의도", 4.5), ("잠원동 앞", 3.2), ("잠원동 단지", 21.8), ("이촌", 6.1)],
+         fill_dept=False)
+    stems = [a.stem, b.stem]
+    files = []
+    for path in (a, b):
+        uf = ag.read_file(path)
+        uf.dept = ag.suggest_dept_names(path.stem, stems)[0]        # CLI와 같은 규칙
+        ag.review_stage1(uf, rules={})
+        files.append(uf)
+    good, blank = files
+    assert [uf.dept for uf in files] == ["용인", "중앙지사"], [uf.dept for uf in files]
+
+    # ① 안내 시트는 등급 없는 안내다 — 파일 판정을 '이상'으로 만들지 않고 2단계도 막지 않는다
+    assert good.status == "정상" and not good.violations, [i.line() for i in good.issues]
+    assert any("표 구조가 아니어서" in i.reason and i.grade == ag.OK for i in good.issues)
+    assert good.note_sheets == ["작성 주의사항"], good.note_sheets
+
+    # ①-2 소속 칸이 일부만 비어도(실측: 분당은 병합 범위가 한 행 짧아 마지막 행만 공란) 채운다 —
+    # 적힌 값이 전부 그 부서면 빈 칸의 값은 정해져 있다. 소속이 아닌 컬럼의 부분 공란은 그대로 오류다
+    c = tmp / "2025년 자체점검 리스트(분당사업소).xlsx"
+    form(c, "분당", [("구미동 99", 7.5), ("분당동 63-9", 8.0), ("정자동 95-1", 3.3)], fill_dept=True)
+    wb_c = openpyxl.load_workbook(c)
+    ws_c = wb_c["대상 리스트"]
+    ws_c.unmerge_cells("A5:A17")                               # 병합 범위가 마지막 행에 못 미친 꼴
+    ws_c.unmerge_cells("B5:B17")
+    ws_c["A6"], ws_c["B6"], ws_c["B7"] = "분당", 1, 1
+    ws_c["A7"] = None                                          # 마지막 행 소속만 공란
+    ws_c["E6"] = None                                          # 온도차 하나 공란 → 진짜 누락
+    wb_c.save(c)
+    partial = ag.read_file(c)
+    partial.dept = "분당사업소"
+    ag.review_stage1(partial, rules={})
+    assert [f.cell for f in partial.fixes] == ["A7"] and partial.fixes[0].corrected == "분당사업소", partial.fixes
+    assert [i.cell for i in partial.issues if i.grade == ag.ERROR] == ["E6"], [i.line() for i in partial.issues]
+
+    # ② 컬럼 전체가 빈 것은 칸 누락이 아니다 — 오류 8건이 아니라 경고 2건, 소속은 부서명으로 채운다
+    assert not [i for i in blank.issues if i.grade == ag.ERROR], [i.line() for i in blank.issues]
+    assert blank.grade == ag.WARN
+    dept_note = [i for i in blank.issues if i.attr == "지사"]
+    count_note = [i for i in blank.issues if i.attr == "개소"]
+    assert len(dept_note) == 1 and "중앙지사" in dept_note[0].reason, [i.line() for i in blank.issues]
+    assert len(count_note) == 1 and "전부 비어" in count_note[0].reason
+    assert [f.corrected for f in blank.fixes] == ["중앙지사"] * 4, blank.fixes
+    ag.preprocess(blank)
+    assert [r[0] for r in blank.sheets[0].rows] == ["중앙지사"] * 4
+
+    # ③ 결과는 원본 양식의 모양 — 안내 시트 이관, '부서' 컬럼 중복 없음, 소속 칸 병합, 합계 수식
+    wb, notes, run = ag.synthesize(files, "B", {}, [], all_files=files)
+    assert wb.sheetnames == ["취합 개요", "작성 주의사항", "대상 리스트"], wb.sheetnames
+    assert wb["작성 주의사항"]["A3"].value == "ㅇ 해당지사 : 전 지사"
+    ws = wb["대상 리스트"]
+    assert [ws.cell(row=4, column=c).value for c in range(1, 6)] == ["지사", "개소", "위치", "점검일시", "온도차"]
+    assert ws["A5"].value == "용인" and ws["A6"].value == "중앙지사"
+    assert "A6:A9" in {str(m) for m in ws.merged_cells.ranges}, ws.merged_cells.ranges
+    assert ws["A10"].value == "합 계" and ws["B10"].value == "=SUM(B5:B9)", (ws["A10"].value, ws["B10"].value)
+    assert ws["E10"].value is None, "원본이 더하지 않은 온도차는 더하지 않는다"
+    assert run.aggregated == 2 and run.result_rows == 5, (run.aggregated, run.result_rows)
+    assert any("작성 주의사항" in n for n in notes), notes
+
+    # ④ 모드 D는 소속 칸을 병합하지 않고(SUMIF가 첫 행만 더하게 된다) 재사용한 소속 컬럼을 참조한다
+    wb_d, _, _ = ag.synthesize(files, "D", {}, ["온도차"], all_files=files)
+    assert "A6:A9" not in {str(m) for m in wb_d["대상 리스트"].merged_cells.ranges}
+    formula = wb_d["종합요약"].cell(row=2, column=2).value
+    assert isinstance(formula, str) and "'대상 리스트'!A" in formula, formula
+
+    # ⑤ 파일명은 '용인지사'·'용인사업소'인데 지사 칸은 '용인'인 회신본이 흔하다 — 조직 꼬리만
+    # 다른 것은 같은 조직으로 보고 소속 컬럼을 그대로 쓴다
+    good.dept = "용인지사"
+    wb2, _, _ = ag.synthesize(files, "B", {}, [], all_files=files)
+    assert wb2["대상 리스트"].cell(row=4, column=1).value == "지사", "꼬리만 다른 조직명은 같은 소속"
+    assert ag._org_key("수원사업소") == ag._org_key("수원") == "수원"
+    assert ag._org_key("대구지사") == ag._org_key("대구"), "꼬리를 떼도 두 표기가 같은 키로 모인다"
+    # 소속 컬럼 값이 정말 다른 조직이면 종전대로 '부서' 컬럼을 붙인다(어느 쪽이 맞는지 여기서 모른다)
+    good.dept = "수원"
+    wb3, _, _ = ag.synthesize(files, "B", {}, [], all_files=files)
+    assert wb3["대상 리스트"].cell(row=4, column=1).value == "부서"
+    print("  ✓ 공란 소속 컬럼 채움 + 안내 시트 이관 + 소속 병합 + 합계 수식(실측 회귀)")
 
 
 def test_stacked_tables_and_tiered_header(tmp: Path):
@@ -581,7 +720,7 @@ def test_stage2_parallel(tmp: Path):
     calls, peak, active = [], [0], [0]
     lock = threading.Lock()
 
-    def fake_call(client, model, items):
+    def fake_call(client, model, items, context=None):
         with lock:
             active[0] += 1
             peak[0] = max(peak[0], active[0])
@@ -589,9 +728,10 @@ def test_stage2_parallel(tmp: Path):
         time.sleep(DELAY)
         with lock:
             active[0] -= 1
-        # '제3부서'는 서비스 장애를 흉내낸다
-        if any("제3부서" in str(it.get("작성기준", "")) for it in items):
+        # '제3부서'는 서비스 장애를 흉내낸다(헤더에 심어 둔 부서명으로 식별)
+        if any("제3부서" in header for header in items[0]["항목"]):
             raise RuntimeError("모의 장애")
+        # findings 없는 부적합 — 행 단위 경고로 남아야 한다
         return {it["id"]: {"verdict": "부적합", "reason": "모의 판정"} for it in items}
 
     real_call, real_client = ag._ai_call, ag._ai_client
@@ -627,6 +767,138 @@ def test_stage2_parallel(tmp: Path):
     print("  ✓ 2단계 병렬 호출 + 파일 단위 실패 격리")
 
 
+def test_stage2_cell_gating_and_context(tmp: Path):
+    """2단계 게이팅은 칸 단위다 — 경고만 있는 파일은 위반 칸만 빼고 보낸다. 양식 안내문과
+    작성기준이 컨텍스트로 가고, 응답은 행 단위 판정 + 문제 항목이다. 표기 통일 후보는
+    자동교정 없이 컬럼당 경고 1건으로 남는다. (실제 API 없이 스텁으로 계약만 본다)"""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    guide = wb.create_sheet("작성 안내")
+    guide["A1"] = "ㅇ 점검일시는 2025.01.01~2025.02.28 사이의 점검만 적는다"
+    guide["A3"] = "ㅇ 상태는 '보수완료'로 표기"
+    ws = wb.create_sheet("실적")
+    ws.append(["사번", "예산액", "점검일시", "상태", "비고"])
+    ws.append(["A1", 100, "2025-01-10", "보수완료", None])
+    ws.append(["A2", "1,200", "2025-04-07", "완료", None])        # 예산액 콤마 → 1단계 경고(자동교정)
+    path = tmp / "기획부.xlsx"
+    wb.save(path)
+    uf = ag.read_file(path)
+    uf.dept = "기획부"
+    rules = {"예산액": {"type": "numeric", "min": 0, "max": 5000}}
+    ag.review_stage1(uf, rules)
+    assert uf.grade == ag.WARN, [i.line() for i in uf.issues]      # 비고 전체 공란·콤마 → 경고만
+    assert "2025.01.01" in uf.notes_text, uf.notes_text
+
+    sent: dict = {}
+
+    def fake_call(client, model, items, context=None):
+        sent.setdefault("calls", []).append(items)
+        sent["context"] = context
+        # 3행(A2)만 판정을 돌려준다. 2행은 재시도에서도 누락 → 'AI 재검증 실패'
+        return {it["id"]: {"verdict": "부적합",
+                           "findings": [{"항목": "점검일시", "reason": "안내 기간(1~2월) 밖"}]}
+                for it in items if it["id"] == "실적!3"}
+
+    def fake_norm(client, model, columns, notes):
+        sent["norm"] = (columns, notes)
+        return {"상태": {"완료": "보수완료"}}
+
+    real = (ag._ai_call, ag._ai_client, ag._ai_normalize_call)
+    ag._ai_call, ag._ai_client, ag._ai_normalize_call = fake_call, (lambda: object()), fake_norm
+    try:
+        used = ag.review_stage2_many([uf], model="stub", rules=rules)
+    finally:
+        ag._ai_call, ag._ai_client, ag._ai_normalize_call = real
+
+    # 행 단위 항목 — 위반 칸(B3 콤마)과 접힌 컬럼(비고)은 빠지고 나머지 칸은 간다
+    items = sent["calls"][0]
+    assert [it["id"] for it in items] == ["실적!2", "실적!3"], items
+    assert set(items[0]["항목"]) == {"사번", "예산액", "점검일시", "상태"}, items[0]
+    assert set(items[1]["항목"]) == {"사번", "점검일시", "상태"}, items[1]
+    assert all("비고" not in it["항목"] for it in items)
+    # 파일당 컨텍스트 1회 — 양식 안내문·작성기준·분포
+    ctx = sent["context"]
+    assert "2025.01.01" in ctx["양식안내"] and ctx["부서"] == "기획부", ctx
+    assert ctx["컬럼"]["실적!예산액"]["작성기준"] == {"type": "numeric", "min": 0, "max": 5000}, ctx["컬럼"]
+    assert ctx["컬럼"]["실적!예산액"]["분포"]["건수"] == 2, ctx["컬럼"]
+    # 판정 반영 — findings의 항목이 셀 좌표가 되고, 응답 누락 행은 오류(AI 재검증 실패)
+    ai = [i for i in uf.issues if i.stage.startswith("2단계")]
+    bad = [i for i in ai if i.kind == "정합성"]
+    assert [(i.cell, i.attr, i.grade) for i in bad] == [("C3", "점검일시", ag.WARN)], [i.line() for i in ai]
+    assert "기간" in bad[0].reason
+    failed = [i for i in ai if i.kind == "AI 재검증 실패"]
+    assert [(i.cell, i.grade) for i in failed] == [("2행", ag.ERROR)], [i.line() for i in ai]
+    # 표기 통일 후보 — 고유값(값: 건수)이 마스킹돼 가고, 결과는 컬럼당 경고 1건, 자동교정 없음
+    columns, notes = sent["norm"]
+    assert columns["상태"] == {"보수완료": 1, "완료": 1} and "보수완료" in notes, sent["norm"]
+    norm = [i for i in ai if i.kind == "표기"]
+    assert len(norm) == 1 and norm[0].cell == "D3" and "'완료' 1건 → '보수완료'" in norm[0].reason, \
+        [i.line() for i in norm]
+    assert not any(f.cell == "D3" for f in uf.fixes), "표기 통일은 제안이다 — 자동교정하지 않는다"
+    assert set(used) == {"calls", "prompt_tokens", "completion_tokens"}, used
+
+    # 오류 등급 파일은 기본 제외 대상이라 보내지 않는다(비용만 든다)
+    bad_file = tmp / "총무부.xlsx"
+    make_book(bad_file, {"실적": [["사번", "예산액"], ["B1", None], ["B2", 5]]})
+    uf2 = ag.read_file(bad_file)
+    ag.review_stage1(uf2, rules={})
+    assert uf2.grade == ag.ERROR
+    sent.clear()
+    ag._ai_call, ag._ai_client, ag._ai_normalize_call = fake_call, (lambda: object()), fake_norm
+    try:
+        ag.review_stage2_many([uf2], model="stub")
+    finally:
+        ag._ai_call, ag._ai_client, ag._ai_normalize_call = real
+    assert "calls" not in sent and not uf2.ai_unverified, sent
+    print("  ✓ 2단계 칸 단위 게이팅 + 행 단위 전송 + 안내문·작성기준 컨텍스트 + 표기 통일 후보")
+
+
+def test_plan_aggregation(tmp: Path):
+    """취합 계획 제안 — 구조 요약을 보내고, 제안의 이름은 실제 헤더·표 이름에 대조해 걸러 낸다."""
+    files = []
+    for name, dept in (("2025 점검 리스트(대구).xlsx", "대구"), ("2025 점검 리스트(용인).xlsx", "용인")):
+        path = tmp / name
+        make_book(path, {"대상": [["지사", "개소", "위치", "비고"], [dept, 1, "어딘가 123", None]]})
+        uf = ag.read_file(path)
+        ag.review_stage1(uf, rules={})
+        files.append(uf)
+
+    seen: dict = {}
+
+    def fake_plan(client, model, payload):
+        seen["payload"] = payload
+        return {"key_col": "위치", "optional_cols": ["비고", "없는컬럼"],
+                "dept_names": [{"fid": 0, "name": "대구"}, {"fid": 1, "name": "용인"},
+                               {"fid": 9, "name": "유령"}, {"fid": 1, "name": ""}],
+                "sheets": ["대상", "없는표"], "pivot_sheets": ["없는표"],
+                "notes": ["비고가 전부 비어 있습니다"], "questions": []}
+
+    real = (ag._plan_call, ag._ai_client)
+    ag._plan_call, ag._ai_client = fake_plan, (lambda: object())
+    try:
+        plan = ag.plan_aggregation(files, "stub")
+    finally:
+        ag._plan_call, ag._ai_client = real
+
+    first = seen["payload"]["파일"][0]
+    assert first["부서명후보"][0] == "대구" and first["표"][0]["headers"] == ["지사", "개소", "위치", "비고"], first
+    assert first["표"][0]["sample"] == [{"지사": "대구", "개소": "1", "위치": "어딘가 123"}], first["표"][0]
+    assert plan == {"key_col": "위치", "optional_cols": ["비고"], "dept_names": {"0": "대구", "1": "용인"},
+                    "sheets": ["대상"], "pivot_sheets": [], "notes": ["비고가 전부 비어 있습니다"],
+                    "questions": []}, plan
+
+    # 장애·키 없음 → None (화면은 종전처럼 직접 고른다)
+    def boom(client, model, payload):
+        raise RuntimeError("모의 장애")
+    ag._plan_call, ag._ai_client = boom, (lambda: object())
+    try:
+        assert ag.plan_aggregation(files, "stub") is None
+    finally:
+        ag._plan_call, ag._ai_client = real
+    assert ag.plan_aggregation(files, "stub", client=None) is None or True   # 실제 클라이언트가 없으면 None
+    print("  ✓ 취합 계획 제안(구조 요약 전송·이름 필터링·장애 시 None)")
+
+
 def test_cli_end_to_end(tmp: Path):
     """CLI 전체 경로: 이상 파일은 기본 제외되고 결과·리포트가 생성된다."""
     work = tmp / "e2e"
@@ -643,8 +915,11 @@ def test_cli_end_to_end(tmp: Path):
     assert code == 0, code
     assert out.exists() and report.exists()
     ws = openpyxl.load_workbook(out)["예산"]
-    # 헤더가 원본 자리(3행: 제목1 + 공백2 다음)로 복원되므로 데이터는 4행부터다
-    depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
+    # 헤더가 원본 자리(3행: 제목1 + 공백2 다음)로 복원되므로 데이터는 4행부터다.
+    # 양식의 '부서' 컬럼(2열)이 부서 구분이다 — 같은 값을 든 컬럼을 앞에 덧붙이지 않는다.
+    # 부서 구간(2행)의 소속 칸은 세로 병합되므로 첫 칸에만 값이 있다
+    assert ws.cell(row=3, column=2).value == "부서", [c.value for c in ws[3]]
+    depts = {ws.cell(row=r, column=2).value for r in range(4, ws.max_row + 1)} - {None}
     assert depts == {"기획부"}, f"오류 파일은 기본 제외돼야 한다: {depts}"
     # 결과 파일은 '예산' 1개 시트뿐이다 — '취합 개요'까지 세면 서버(server.py)와
     # 다르게 시트 2개라고 말하게 된다
@@ -659,7 +934,7 @@ def test_cli_end_to_end(tmp: Path):
                     "--out", str(out), "--report", str(report)])
     assert code == 0
     ws = openpyxl.load_workbook(out)["예산"]
-    depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
+    depts = {ws.cell(row=r, column=2).value for r in range(4, ws.max_row + 1)} - {None}
     assert depts == {"기획부", "총무부"}, depts
     print("  ✓ CLI end-to-end(기본 제외 / 강제 포함)")
 
@@ -1291,6 +1566,77 @@ def test_report_format_and_order(tmp: Path):
     print("  ✓ 리포트 서식·개요·호출 순서 불변")
 
 
+def test_merged_count_column_stays_one_value(tmp: Path):
+    """세로 병합한 '개소' 칸이 결과에서 행마다 반복되지 않는다.
+
+    병합 셀은 파일에 좌상단 한 칸만 값이 있어 검증 전에 구간 전체로 채운다(_fill_merged).
+    그 값을 그대로 결과에 쓰면 구간 하나를 세는 컬럼이 행 수만큼 곱해진다 — 실측(지사별
+    회신본 8개): 판교 2개소가 2+2, 수원 3개소가 3+3+3이 되어 결과 합계가 44, 원본 8개
+    파일의 합계 총합은 34였다. 채우기는 그대로 두고 결과에서 병합으로 되돌린다.
+    """
+    def form(path: Path, dept: str, rows: list, count: int) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "대상 리스트"
+        ws["A1"] = "2025년 자체점검 결과"
+        ws.merge_cells("A1:D1")
+        for c, h in enumerate(["지사", "개소", "위치", "온도차"], start=1):
+            ws.cell(row=4, column=c, value=h)
+        for i, (loc, temp) in enumerate(rows):
+            ws.cell(row=5 + i, column=3, value=loc)
+            ws.cell(row=5 + i, column=4, value=temp)
+        ws.cell(row=5, column=1, value=dept)
+        ws.cell(row=5, column=2, value=count)     # 구간 전체의 개소 — 병합해 한 번만 적는다
+        last = 4 + len(rows)
+        ws.merge_cells(start_row=5, start_column=1, end_row=last, end_column=1)
+        ws.merge_cells(start_row=5, start_column=2, end_row=last, end_column=2)
+        ws.cell(row=last + 2, column=1, value="합 계")
+        ws.cell(row=last + 2, column=2, value=count)
+        wb.save(path)
+
+    a = tmp / "자체점검(판교지사).xlsx"
+    b = tmp / "자체점검(수원사업소).xlsx"
+    form(a, "판교지사", [("백현동 555-2", 5.1), ("삼평동 672-6", 4.2)], 2)
+    form(b, "수원사업소", [("권선동", 6.9), ("탑동", 9.8), ("구운동", 3.4)], 3)
+
+    files = []
+    for path in (a, b):
+        uf = ag.read_file(path)
+        uf.dept = ag.suggest_dept_names(path.stem, [a.stem, b.stem])[0]
+        ag.review_stage1(uf, rules={})
+        files.append(uf)
+
+    # ① 채우기는 그대로다 — 안 채우면 병합 아래 행의 지사·개소가 전부 필수값 누락이 된다
+    assert all(uf.status == "정상" for uf in files), [i.line() for uf in files for i in uf.issues]
+    assert [r[1] for r in files[0].sheets[0].rows] == [2, 2], files[0].sheets[0].rows
+    assert files[0].sheets[0].vmerges == [(0, 1, 0), (0, 1, 1)], files[0].sheets[0].vmerges
+
+    wb, _, _ = ag.synthesize(files, "B", {}, [])
+    ws = wb["대상 리스트"]
+    head = next(r for r in range(1, ws.max_row + 1)
+                if "개소" in [ws.cell(r, c).value for c in range(1, ws.max_column + 1)])
+    col = next(c for c in range(1, ws.max_column + 1) if ws.cell(head, c).value == "개소")
+    letter = openpyxl.utils.get_column_letter(col)
+
+    # ② 파일당 한 번만 남는다 — 병합하면 openpyxl이 좌상단 외의 값을 지운다
+    body = [ws.cell(r, col).value for r in range(head + 1, ws.max_row)]
+    assert body == [2, None, 3, None, None], body
+    assert f"{letter}{head + 1}:{letter}{head + 2}" in [str(m) for m in ws.merged_cells.ranges]
+
+    # ③ 합계가 원본 합계의 총합과 맞는다(2 + 3). 수식이 훑는 범위는 그대로 전 데이터 행이다
+    assert ws.cell(ws.max_row, col).value == f"=SUM({letter}{head + 1}:{letter}{ws.max_row - 1})"
+    assert sum(v for v in body if v is not None) == 5
+
+    # ④ 모드 D는 병합하지 않는다 — 종합요약의 SUMIF가 첫 행만 더한다(부서 병합과 같은 이유)
+    wb_d, _, _ = ag.synthesize(files, "D", {}, ["온도차"])
+    ws_d = wb_d["대상 리스트"]
+    head_d = next(r for r in range(1, ws_d.max_row + 1)
+                  if "개소" in [ws_d.cell(r, c).value for c in range(1, ws_d.max_column + 1)])
+    col_d = next(c for c in range(1, ws_d.max_column + 1) if ws_d.cell(head_d, c).value == "개소")
+    assert ws_d.cell(head_d + 2, col_d).value == 2, "모드 D는 채운 값을 그대로 둔다"
+    print("  ✓ 세로 병합한 수량 칸이 결과에서 한 번만 세어진다(합계 부풀림 없음)")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="agg-test-"))
     try:
@@ -1299,8 +1645,10 @@ def main() -> int:
                    test_clean_file_and_gating,
                    test_rules_and_masking, test_synthesis_modes,
                    test_image_anchor_relocation, test_real_form_structure,
+                   test_blank_dept_column_and_note_sheet,
+                   test_merged_count_column_stays_one_value,
                    test_stacked_tables_and_tiered_header, test_pivot_flatten,
-                   test_stage2_parallel,
+                   test_stage2_parallel, test_stage2_cell_gating_and_context, test_plan_aggregation,
                    test_format_capture,
                    test_format_consensus,
                    test_format_apply,

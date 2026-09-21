@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 os.environ["AUTH_DISABLED"] = "1"
 
 import server  # noqa: E402
+import aggregate as ag  # noqa: E402
 
 client = TestClient(server.app)
 
@@ -205,7 +206,9 @@ def test_end_to_end():
 
     body = wait(client.post(f"/api/session/{sid}/aggregate",
                             json={"mode": "B", "included": [0], "group_map": {}, "summary_cols": []}))
-    assert body["metrics"] == {"aggregated": 1, "sheets": 1, "autofixed": 0, "excluded": 1}, body["metrics"]
+    # ai_calls·ai_tokens는 이 작업의 AI 사용량(취합 계획 + 2단계) — no_ai라 0이다
+    assert body["metrics"] == {"aggregated": 1, "sheets": 1, "autofixed": 0, "excluded": 1,
+                               "ai_calls": 0, "ai_tokens": 0}, body["metrics"]
     assert body["result_sheets"] == ["예산"], body["result_sheets"]
     assert body["excluded_files"][0]["name"] == "총무부.xlsx", body["excluded_files"]
     assert body["forced_notice"] == [], body["forced_notice"]
@@ -299,11 +302,13 @@ def test_optional_columns():
     sid = new_session()
     wait(upload(sid, [("기획부.xlsx", book_bytes(WITH_BLANK_NOTE))]))
 
-    # 지정 없이는 엔진 기본값(전 컬럼 필수) → 빈 비고가 필수값 누락으로 잡힌다
+    # 지정 없이는 엔진 기본값(전 컬럼 필수)이지만, 컬럼 전체가 비었으면 '빠뜨린 칸'이 아니라
+    # '안 쓴 컬럼'이다 → 칸마다 오류가 아니라 경고 1건으로 접히고 파일은 취합에 기본 포함된다
     data = wait(client.post(f"/api/session/{sid}/review", json={"no_ai": True}))["files"][0]
     assert data["status"] == "이상", data
-    assert any("누락" in i["message"] and i["column"] == "비고" for i in data["issues"]), data["issues"]
-    assert data["default_checked"] is False, "오류 등급이라 기본 해제돼야 한다"
+    notes = [i for i in data["issues"] if i["column"] == "비고"]
+    assert len(notes) == 1 and "전부 비어" in notes[0]["message"], data["issues"]
+    assert data["default_checked"] is True, "경고 등급이라 기본 포함돼야 한다(파일이 통째로 빠지지 않는다)"
 
     # 비고를 선택 입력으로 지정하면 정상으로 돌아오고 취합 대상에 포함된다
     data = wait(client.post(f"/api/session/{sid}/review",
@@ -353,8 +358,8 @@ def test_dept_names():
     # 같이 올라온 파일명의 공통어('점검', '리스트')는 제목이므로 뒤로 밀린다
     assert files[0]["dept_candidates"][0] == "대구", files[0]["dept_candidates"]
     assert files[1]["dept_candidates"][0] == "판교지사", files[1]["dept_candidates"]
-    # 기본값은 종전대로 파일명 전체 — 사용자가 고르기 전까지는 바뀌지 않는다
-    assert files[0]["dept"] == "2025년 점검 리스트(대구)", files[0]["dept"]
+    # 기본값은 후보 1순위(첫 칩)다 — 파일명 전체가 기본이면 소속 컬럼 자동 채움이 그걸 써 넣는다
+    assert files[0]["dept"] == "대구", files[0]["dept"]
 
     # 사용자가 정한 이름이 결과의 '부서' 컬럼에 들어간다
     wait(client.post(f"/api/session/{sid}/review",
@@ -367,7 +372,8 @@ def test_dept_names():
     wb = openpyxl.load_workbook(io.BytesIO(res.content))
     ws = wb["예산"]
     # 원본 서식을 상속해 제목 블록(1행)·공백(2행)을 되살리므로 헤더는 3행, 데이터는 4행부터다
-    depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)}
+    # 부서 구간의 소속 칸은 세로 병합되므로 구간의 첫 칸에만 값이 있다
+    depts = {ws.cell(row=r, column=1).value for r in range(4, ws.max_row + 1)} - {None}
     assert depts == {"대구", "판교지사"}, depts
 
     # 모드 A는 시트명에도 쓰인다
@@ -515,6 +521,34 @@ def test_clock_skew_tolerance():
     print("  ✓ 시계 오차 허용(방금 발급된 토큰 통과 / 한참 미래 토큰은 거부)")
 
 
+def test_plan_endpoint():
+    """업로드 직후 AI 취합 계획 — AI가 없으면 plan이 null이고, 제안은 실제 헤더에 대조해 걸러진다."""
+    sid = new_session()
+    wait(upload(sid, [("2025 점검(대구).xlsx", book_bytes(CLEAN)),
+                      ("2025 점검(판교지사).xlsx", book_bytes(CLEAN))]))
+    real = (ag._plan_call, ag._ai_client)
+    ag._ai_client = lambda: None                       # 키 없음 → 제안 없이 종전 흐름
+    try:
+        body = wait(client.post(f"/api/session/{sid}/plan"))
+    finally:
+        ag._plan_call, ag._ai_client = real
+    assert body["plan"] is None and body["ai_usage"]["calls"] == 0, body
+
+    ag._plan_call = lambda c, m, p: {"key_col": "사번", "optional_cols": ["예산액", "없는컬럼"],
+                                     "dept_names": [{"fid": 1, "name": "판교지사"}],
+                                     "sheets": ["예산"], "pivot_sheets": [],
+                                     "notes": ["샘플 관찰"], "questions": ["부서명이 맞나요?"]}
+    ag._ai_client = lambda: object()
+    try:
+        body = wait(client.post(f"/api/session/{sid}/plan"))
+    finally:
+        ag._plan_call, ag._ai_client = real
+    plan = body["plan"]
+    assert plan["key_col"] == "사번" and plan["optional_cols"] == ["예산액"], plan
+    assert plan["dept_names"] == {"1": "판교지사"} and plan["questions"] == ["부서명이 맞나요?"], plan
+    print("  ✓ AI 취합 계획 엔드포인트(AI 없음→null / 제안 필터링)")
+
+
 def test_result_has_format():
     """다운로드한 결과·리포트에 서식과 취합 개요가 들어 있다."""
     sid = new_session()
@@ -536,15 +570,16 @@ def test_result_has_format():
 
     ws = wb["예산"]
     assert ws["A1"].value == "실적 보고"                 # 제목 블록이 살아 있다
-    assert ws.cell(row=3, column=1).value == "부서"      # 헤더는 원본 자리(3행)
-    assert ws.cell(row=3, column=2).value == "사번"
-    # 부서 컬럼값은 파일명이 아니라 확장자를 뗀 파일명(§9)이다
-    assert ws.cell(row=4, column=1).value == "기획부"
+    # 헤더는 원본 자리(3행). 양식의 '부서' 컬럼 값이 부서명(확장자를 뗀 파일명, §9)과 같으므로
+    # 구분 컬럼을 하나 더 붙이지 않고 그 컬럼을 쓴다
+    assert ws.cell(row=3, column=1).value == "사번"
+    assert ws.cell(row=3, column=2).value == "부서"
+    assert ws.cell(row=4, column=2).value == "기획부"
     # book_bytes()의 헤더 행은 굵게 꾸미지 않았다 — 규칙 1·2는 원본 서식을 그대로
     # 옮기는 것이지 강조를 지어내지 않는다(강조는 basic() 폴백에서만 나온다)
     assert ws.cell(row=3, column=1).font.bold is False
     assert ws.freeze_panes == "A4"
-    assert ws.auto_filter.ref == "A3:D5"
+    assert ws.auto_filter.ref == "A3:C5"                 # 사번·부서·예산액 3열(부서 컬럼 중복 없음)
     assert ws.column_dimensions["A"].width                # 열너비가 지정돼 있다
 
     # 제출 2 · 취합 1 · 제외 1이 결과 파일 안에 적혀 있다
@@ -600,7 +635,7 @@ def main() -> int:
                test_job_progress,
                test_hwpx_end_to_end, test_hwpx_rejected, test_session_sweep,
                test_form_requires_store, test_pivot_sheets,
-               test_clock_skew_tolerance, test_result_has_format,
+               test_clock_skew_tolerance, test_plan_endpoint, test_result_has_format,
                test_template_lookup_failure_falls_back):
         fn()
     print("\n전체 통과")
