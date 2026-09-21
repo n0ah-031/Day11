@@ -11,3 +11,7 @@ dist/
 *.pem
 ssh-key-*
 .venv/
+
+# CLI·실측 산출물 — 코드가 만들어내는 결과물이라 기록에 남길 것이 없다
+merged*.xlsx
+*report*.xlsx

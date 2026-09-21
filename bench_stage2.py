@@ -88,7 +88,7 @@ def main() -> int:
         calls = {"n": 0}
         real = ag._ai_call
 
-        def stub(client, model, batch):
+        def stub(client, model, batch, context=None):
             calls["n"] += 1
             time.sleep(0.05)
             return {it["id"]: {"id": it["id"], "verdict": "적합", "reason": ""} for it in batch}

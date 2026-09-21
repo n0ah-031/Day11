@@ -19,6 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -347,6 +348,39 @@ def close_sheet(ws, tpl: FormatTemplate, out_headers: list, first_data_row: int,
             ws.page_setup.fitToHeight = 0
     except Exception:
         pass
+
+
+def copy_sheet(src_path, sheet_name: str, wb, title: str, index: int | None = None) -> bool:
+    """원본 파일의 시트 하나를 값·서식·병합·열너비·행높이째 결과 통합문서로 옮긴다.
+
+    표가 아닌 안내 시트(작성 주의사항 등)를 결과에 그대로 싣는 데 쓴다. 다른 통합문서의
+    `_style` 인덱스는 옮길 수 없으므로 CellStyle로 속성을 하나씩 복사한다. 실패하면
+    False — 안내 시트는 부가물이라 결과를 막지 않는다.
+    """
+    try:
+        src_wb = openpyxl.load_workbook(Path(src_path))
+        if sheet_name not in src_wb.sheetnames:
+            return False
+        src = src_wb[sheet_name]
+        ws = wb.create_sheet(title, index)
+        for row in src.iter_rows():
+            for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
+                target = ws.cell(row=cell.row, column=cell.column, value=cell.value)
+                CellStyle.of(cell).put(target)
+                target.number_format = cell.number_format
+        for rng in src.merged_cells.ranges:
+            ws.merge_cells(str(rng))
+        for letter, dim in src.column_dimensions.items():
+            if dim.width:
+                ws.column_dimensions[letter].width = dim.width
+        for number, dim in src.row_dimensions.items():
+            if dim.height:
+                ws.row_dimensions[number].height = dim.height
+        return True
+    except Exception:
+        return False
 
 
 @dataclass

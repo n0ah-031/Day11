@@ -237,6 +237,8 @@
 
 <!-- 키 컬럼: 작업 단위 전역 1개. 파일 업로드 전에는 숨긴다 -->
 <div id="key-col-panel" class="hidden mt-md rounded-xl glass-card shadow-soft p-6 flex flex-col gap-2">
+<!-- AI 취합 계획(업로드 직후 양식 구조를 읽고 아래 설정을 미리 채운다). 제안일 뿐이라 사용자가 고친다 -->
+<div id="plan-note" class="hidden mb-4 rounded-lg bg-primary/5 border border-primary/20 px-4 py-3 text-body-sm font-body-sm text-on-surface-variant"></div>
 <!-- 생성·등록한 양식의 작성기준 가져오기(F1-6·F6-6). 양식이 없으면 이 줄을 숨긴다 -->
 <div id="template-row" class="hidden mb-4 flex flex-col gap-2">
 <label class="text-body-md font-body-md font-semibold text-on-surface" for="template-pick">생성·등록한 양식의 작성기준</label>
@@ -537,6 +539,7 @@ AI 검증 없이 빠르게 검토
     const files = [...fileList];
     if (!files.length) return;
     clearError();
+    let uploaded = false;
     busy(true, '파일을 읽는 중…');
     try {
       if (!state.sid) state.sid = (await api('/api/session', { method: 'POST' })).sid;
@@ -551,8 +554,45 @@ AI 검증 없이 빠르게 검토
       $('template-pick').value = '';
       $('template-note').textContent = templateNoteDefault;
       renderFiles();
+      uploaded = true;
     } catch (e) {
       showError(e.message);
+    } finally {
+      busy(false);
+    }
+    // AI가 양식 구조를 읽고 설정을 미리 채운다. 'AI 검증 없이'를 켰으면 부르지 않는다(유료 호출)
+    if (uploaded && !$('no-ai').checked && state.files.some((f) => f.readable)) await applyPlan();
+  }
+
+  // ── AI 취합 계획 — 손으로 취합할 때 첫 단계(양식을 읽고 판단할 것을 정하는 일)를 대신한다 ──
+  // 사용자가 이미 만진 설정은 덮지 않는다. 제안은 칩에 채워져 눈에 보이고, 틀리면 고친다.
+  async function applyPlan() {
+    busy(true, 'AI가 양식 구조를 읽는 중…');
+    try {
+      const res = await runJob(`/api/session/${state.sid}/plan`, { method: 'POST' }, 'AI가 양식 구조를 읽는 중…');
+      const p = res.plan;
+      $('plan-note').classList.remove('hidden');
+      if (!p) {
+        $('plan-note').textContent = 'AI 취합 계획을 받지 못했습니다(AI 미사용 또는 장애). 아래 설정을 직접 확인하세요.';
+        return;
+      }
+      if (!state.keyCol && p.key_col) state.keyCol = p.key_col;
+      if (!state.optionalCols.size && (p.optional_cols || []).length) state.optionalCols = new Set(p.optional_cols);
+      for (const [fid, name] of Object.entries(p.dept_names || {})) {
+        if (state.deptNames[fid] == null) state.deptNames[fid] = name;
+      }
+      if ((p.sheets || []).length) state.sheets = new Set(p.sheets);
+      if ((p.pivot_sheets || []).length) state.pivot = new Set(p.pivot_sheets);
+      renderFiles();
+      const lines = [...(p.notes || []), ...(p.questions || []).map((q) => '확인 필요: ' + q)];
+      const used = res.ai_usage && res.ai_usage.calls
+        ? ` (API ${res.ai_usage.calls}회 · 토큰 ${res.ai_usage.prompt_tokens + res.ai_usage.completion_tokens})` : '';
+      $('plan-note').innerHTML =
+        `<span class="font-semibold text-on-surface">AI 취합 계획</span> — 키 컬럼·선택 입력 컬럼·부서명·취합할 표를 미리 채웠습니다. 틀리면 아래에서 직접 고치세요.${esc(used)}`
+        + (lines.length ? `<ul class="mt-2 list-disc pl-5 flex flex-col gap-1">${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : '');
+    } catch (e) {
+      $('plan-note').classList.remove('hidden');
+      $('plan-note').textContent = 'AI 취합 계획 실패: ' + e.message + ' — 아래 설정을 직접 확인하세요.';
     } finally {
       busy(false);
     }
